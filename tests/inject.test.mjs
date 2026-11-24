@@ -31,9 +31,53 @@ function createFixture(readers, runTask, requestContext = context, requestFrame 
     readSources: () => ({ listSkills: () => [{ name: 'short' }], ...readers }),
     runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
-  apply({ tavern: { capabilities: { writingPreparation: 5 }, writingPreparation: value => preparation.register('pure-writer', value) } })
+  apply({ tavern: {
+    capabilities: { writingPreparation: 6 }, handle() {}, readGameData: async () => null,
+    writingPreparation: value => preparation.register('pure-writer', value)
+  } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext, frame: requestFrame })
 }
+
+test('按对局保存接管开关，默认采用前台请求模型并允许单独指定', async () => {
+  const handlers = new Map()
+  const saved = new Map()
+  const calls = []
+  const foreground = { provider: 'fixture', model: 'writer', reasoningEffort: 'high' }
+  const independent = { provider: 'fixture', model: 'researcher' }
+  const preparation = createWritingPreparation({
+    allowed: async () => true,
+    readSources: () => ({ listSkills: () => [] }),
+    runAgent: (_owner, task) => calls.push(task.selection)
+  })
+  apply({ tavern: {
+    capabilities: { writingPreparation: 6 },
+    handle: (name, handler) => handlers.set(name, handler),
+    readGameData: async ({ gameId }) => structuredClone(saved.get(gameId)),
+    saveGameData: async ({ gameId, data }) => saved.set(gameId, structuredClone(data)),
+    taskModels: async () => ({ catalog: [{ provider: 'fixture', models: [{ id: 'researcher' }] }] }),
+    writingPreparation: value => preparation.register('pure-writer', value)
+  } })
+  const call = (action, args) => handlers.get('dsh-tavern-pure-writer/' + action)({ gameId: 'game', ...args })
+  const prepare = async gameId => preparation.prepare(await preparation.forGame(gameId), {
+    gameId, frame, context, foregroundSelection: foreground
+  })
+
+  assert.deepEqual(await call('settings'), { enabled: true, selection: null })
+  await prepare('game')
+  assert.deepEqual(calls.at(-1), foreground)
+  await Promise.all([call('save-settings', { enabled: false }), call('save-settings', { selection: independent })])
+  assert.equal(await preparation.forGame('game'), null)
+  assert.deepEqual(await call('settings'), { enabled: false, selection: independent })
+  await prepare('another-game')
+  assert.deepEqual(calls.at(-1), foreground)
+  await call('save-settings', { enabled: true })
+  await prepare('game')
+  assert.deepEqual(calls.at(-1), independent)
+  await assert.rejects(call('save-settings', { selection: { ...independent, model: 'removed' } }), /模型已不可用/)
+  await call('save-settings', { selection: null })
+  await prepare('game')
+  assert.deepEqual(calls.at(-1), foreground)
+})
 
 test('本轮常驻世界书替代开局快照，显式清空时不会恢复旧内容', () => {
   const old = { name: 'tavern:constant-worldbook', text: '<lorebook_constant>\n旧设定\n</lorebook_constant>' }
@@ -223,7 +267,8 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
     recordFrame: () => {},
     writingPreparation: {
       forGame: async () => ({}),
-      prepare: async (_entry, { context, frame }) => {
+      prepare: async (_entry, { context, frame, foregroundSelection }) => {
+        assert.deepEqual(foregroundSelection, { provider: 'fixture', model: 'writer', reasoningEffort: 'high' })
         shared = context
         passes++
         return frame.turn === 3 ? result.content[0].text : ''
@@ -236,7 +281,8 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
     decision: { messages: [player] }
   })
   assert.equal(passes, 0)
-  const nativeRequest = { sessionId: 'game', messages: [checkpoint, ...history, ...decision.messages], tools: [{ name: 'submit_story' }] }
+  const nativeRequest = { sessionId: 'game', provider: 'fixture', model: 'writer', reasoningEffort: 'high',
+    messages: [checkpoint, ...history, ...decision.messages], tools: [{ name: 'submit_story' }] }
   const foreground = await strategy.prepareWritingRequest(nativeRequest)
   assert.deepEqual(await strategy.prepareWritingRequest({ ...nativeRequest, messages: [...nativeRequest.messages, ...persisted] }), foreground)
   assert.equal(passes, 1)

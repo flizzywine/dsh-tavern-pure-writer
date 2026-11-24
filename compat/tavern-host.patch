@@ -410,7 +410,7 @@ index 13631f301..ac8a6c954 100644
    // 认不出来时模板同步会把压缩摘要改写成玩家原文，而在压缩之外替换检查点的存档，
    // DSH 重启后会拒绝加载（compaction checkpoint has no matching compaction/start）。
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-index 61d5af4e6..9b851051c 100644
+index 61d5af4e6..77d35f9d1 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 +++ b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 @@ -1,5 +1,5 @@
@@ -495,7 +495,7 @@ index 61d5af4e6..9b851051c 100644
      // Models that update the system prompt in history would otherwise append the
      // new prompt after the old one, leaving a switched-out preset at the head.
      // A new request series makes DSH replace the head instead. Unknown history
-@@ -404,10 +425,43 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -404,10 +425,45 @@ export function createNativePlayOrchestrationStrategy(options) {
      return { kind: 'enter', messages: agentMessages, ...(switched ? { startsRequestSeries: true } : {}) }
    }
 
@@ -507,8 +507,10 @@ index 61d5af4e6..9b851051c 100644
 +    const messages = projectLegacyOpeningSources(projectRegenerationRequestMessages(request.messages))
 +    const context = pureWritingContext(staged.system, messages)
 +    if (!staged.preparation) {
++      const { provider, model, reasoningEffort } = request
++      const foregroundSelection = provider && model ? { provider, model, reasoningEffort } : undefined
 +      staged.preparation = options.writingPreparation.prepare(staged.pureWriter, {
-+        gameId: sessionId, frame, chat: staged.chat, signal: request.signal, context
++        gameId: sessionId, frame, chat: staged.chat, signal: request.signal, context, foregroundSelection
 +      }).then(material => {
 +        request.signal?.throwIfAborted()
 +        const injection = pureWritingInjection(frame, material)
@@ -539,7 +541,7 @@ index 61d5af4e6..9b851051c 100644
      // Empty surface tombstones preserve append-only history, but are not messages
      // for the provider. Remove them before choosing a regeneration target.
      const visibleMessages = (optionsValue.messages || []).filter(hasProviderContent)
-@@ -535,6 +589,7 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -535,6 +591,7 @@ export function createNativePlayOrchestrationStrategy(options) {
  
    function completeRequest(optionsValue, completed) {
      if (!completed || !requestHandledBy(optionsValue, PROJECTED)) return false
@@ -547,7 +549,7 @@ index 61d5af4e6..9b851051c 100644
      stagedRequests.delete(str(optionsValue && optionsValue.sessionId))
      return true
    }
-@@ -545,6 +600,12 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -545,6 +602,12 @@ export function createNativePlayOrchestrationStrategy(options) {
    }
  
    async function assembleSystemPrompt(assembly, input) {
@@ -560,7 +562,7 @@ index 61d5af4e6..9b851051c 100644
      const mode = await options.modeFor(input.sessionId)
      const visible = new Set(await options.visibleTools(input.sessionId))
      const playMode = mode === 'story' || mode === 'script'
-@@ -649,7 +710,8 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -649,7 +712,8 @@ export function createNativePlayOrchestrationStrategy(options) {
      return assembly
    }
  
@@ -570,7 +572,7 @@ index 61d5af4e6..9b851051c 100644
  }
  
  export function createForegroundOrchestrationStrategies(options) {
-@@ -684,5 +746,5 @@ export function createForegroundOrchestrationStrategies(options) {
+@@ -684,5 +748,5 @@ export function createForegroundOrchestrationStrategies(options) {
      return await nativePlay.assembleSystemPrompt(assembly, input)
    }
  
@@ -1301,10 +1303,10 @@ index 000000000..d2fbf1282
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..13f9c56f3
+index 000000000..eb24e57f5
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,145 @@
 +import { untilAborted } from './plugin-callback.js'
 +import { writingMaterialText } from './writing-material-text.js'
 +import { stripWritingSystemReminders } from './writing-system-reminders.js'
@@ -1339,10 +1341,11 @@ index 000000000..13f9c56f3
 +export function createWritingPreparation({ allowed, runAgent, readSources }) {
 +  const entries = new Map()
 +
-+  function register(owner, { prepare } = {}) {
++  function register(owner, { prepare, settingsForGame } = {}) {
 +    if (typeof prepare !== 'function') throw new TypeError('writingPreparation 需要 prepare 函数')
++    if (settingsForGame !== undefined && typeof settingsForGame !== 'function') throw new TypeError('settingsForGame 必须是函数')
 +    if (entries.has(owner)) throw new Error('插件已注册白手套 Agent')
-+    const entry = { owner, prepare, lifetime: new AbortController() }
++    const entry = { owner, prepare, settingsForGame, lifetime: new AbortController() }
 +    entries.set(owner, entry)
 +    return () => {
 +      if (entries.get(owner) !== entry) return
@@ -1355,13 +1358,17 @@ index 000000000..13f9c56f3
 +    if (!entries.size) return null
 +    const applicable = []
 +    for (const entry of entries.values()) {
-+      if (await allowed(entry.owner, gameId)) applicable.push(entry)
++      if (!await allowed(entry.owner, gameId)) continue
++      const settings = await entry.settingsForGame?.(gameId)
++      if (settings?.enabled !== false && !entry.lifetime.signal.aborted) {
++        applicable.push({ ...entry, selection: settings?.selection })
++      }
 +    }
 +    if (applicable.length > 1) throw new Error('本局有多个白手套 Agent 插件，请只启用一个')
 +    return applicable[0] ?? null
 +  }
 +
-+  async function prepare(entry, { gameId, frame, chat, context, signal }) {
++  async function prepare(entry, { gameId, frame, chat, context, foregroundSelection, signal }) {
 +    const done = new AbortController()
 +    const requestSignal = AbortSignal.any([done.signal, entry.lifetime.signal, AbortSignal.timeout(TIMEOUT_MS), ...(signal ? [signal] : [])])
 +    const toolResults = []
@@ -1429,7 +1436,8 @@ index 000000000..13f9c56f3
 +        inject,
 +        runAgent: task => {
 +          requestSignal.throwIfAborted()
-+          return runAgent(entry.owner, { ...task, gameId, signal: requestSignal }, queryContext, (name, result) => {
++          const selection = task.selection ?? entry.selection ?? foregroundSelection
++          return runAgent(entry.owner, { ...task, gameId, selection, signal: requestSignal }, queryContext, (name, result) => {
 +            // Keep call order for concurrent tools and reuse the exact model-facing receipt.
 +            if (!submitted && name !== 'inject' && name !== 'load_writing_skill') toolResults.push(result)
 +          })
@@ -1685,7 +1693,7 @@ index 422058325..9751c658e 100644
      const nativeWorldbook = needWorldbook && chat.worldbookStrategy === 'native-skills'
      const needPlugins = Boolean(pluginPromptSections && chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(mode))
 diff --git a/tavern-plugin/lib/index.js b/tavern-plugin/lib/index.js
-index a607f42ee..e60646a47 100644
+index a607f42ee..e5c6e5abc 100644
 --- a/tavern-plugin/lib/index.js
 +++ b/tavern-plugin/lib/index.js
 @@ -41,7 +41,7 @@ import { registerRequestHooks } from './hooks/request.js'
@@ -1736,9 +1744,11 @@ index a607f42ee..e60646a47 100644
    // A member with a prefix of its own (`system`): that prefix, and the prompt as the task's one
    // message; the plugin hands it whatever story it needs.
 -  async function runPluginTask({ gameId, owner, prompt, tools, call, signal, member = '', system, selection: customSelection, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText, id = '', rewindTo, rewindFormatVersion, resolvePersistentSessionId, onPersistentSessionReady }) {
+-    const selection = customSelection || backgroundModelSelection(await backgroundConfigForSession(gameId))
+-    if (!selection) throw new Error('这局没有可用的后台模型')
 +  async function runPluginTask({ gameId, owner, prompt, tools, call, signal, member = '', system, selection: customSelection, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText, id = '', rewindTo, rewindFormatVersion, resolvePersistentSessionId, onPersistentSessionReady, writingPreparation }) {
-     const selection = customSelection || backgroundModelSelection(await backgroundConfigForSession(gameId))
-     if (!selection) throw new Error('这局没有可用的后台模型')
++    const selection = customSelection || (writingPreparation ? modelSelection(gameId) : backgroundModelSelection(await backgroundConfigForSession(gameId)))
++    if (!selection) throw new Error(writingPreparation ? '这局没有可用的前台模型' : '这局没有可用的后台模型')
      const chat = await storyContext({ sessionId: gameId })
      const recent = (chat?.messages || []).filter(message => message && !message.greeting && ['user', 'assistant'].includes(message.role)).slice(-2)
        .map(message => ({ role: message.role, content: [{ type: 'text', text: pluginSource(message).slice(-2400) }] }))
@@ -1825,7 +1835,7 @@ index a607f42ee..e60646a47 100644
          return settings.storyInputToolCall === true || settings.storyOutputToolCall === true
        },
 diff --git a/tavern-plugin/lib/plugin-api.js b/tavern-plugin/lib/plugin-api.js
-index 14bdb2987..fd907f9b2 100644
+index 14bdb2987..ebd52d5be 100644
 --- a/tavern-plugin/lib/plugin-api.js
 +++ b/tavern-plugin/lib/plugin-api.js
 @@ -15,6 +15,7 @@ import path from 'node:path'
@@ -1840,7 +1850,7 @@ index 14bdb2987..fd907f9b2 100644
      return name
    }
    const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, guideSource: 1,
-+    ...(deps.writingSources ? { writingPreparation: 5 } : {}),
++    ...(deps.writingSources ? { writingPreparation: 6 } : {}),
      ...(deps.readTavernSettings && deps.updateTavernSettings ? { bodyGenerationDefaults: 1 } : {}),
      ...(deps.generationPresets ? { generationPresets: 1 } : {}),
      ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),

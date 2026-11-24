@@ -13,6 +13,7 @@
   "files": ["lib", "client.js", "cordis.patch.yml"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["dsh-tavern-plugin", "dsh-better-sidebar"] },
     "compatibility": { "tavernApiVersion": 8 }
   },
   "license": "MIT"

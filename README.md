@@ -6,7 +6,7 @@
 
 ## 宿主兼容性
 
-插件需要 `tavern.capabilities.writingPreparation === 5`。[宿主兼容补丁](compat/tavern-host.patch) 以 Tavern 提交 `3dd131c9e` 为基线，添加这个接口及对应的正文请求流程。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
+插件需要白手套接口 v6。[宿主兼容补丁](compat/tavern-host.patch) 以 Tavern 提交 `3dd131c9e` 为基线，添加这个接口及对应的正文请求流程。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
 
 ```sh
 git -C /path/to/dsh-tavern apply --check /path/to/dsh-tavern-pure-writer/compat/tavern-host.patch
@@ -17,7 +17,9 @@ git -C /path/to/dsh-tavern apply /path/to/dsh-tavern-pure-writer/compat/tavern-h
 
 将仓库克隆到所用 Tavern 的持久数据目录 `plugins/dsh-tavern-pure-writer/` 下，或将插件包解压到这个位置。CLI 版默认的目标目录是 `~/.dsh-tavern/profile-data/tavern/data/plugins/dsh-tavern-pure-writer/`。重启宿主，在「设置 → DSH Tavern → 插件」确认插件已加载。停用插件后，下一轮恢复 Tavern 的原有生成流程。
 
-白手套 Agent 使用该局的后台模型，查完直接结束。写作 Skill 与参考资料用于白手套本轮查询，世界书、记忆和变量的有效回执才交给前台。有回执时，程序将原文保存在当轮玩家输入与正文之间，后续请求随会话历史读取。查询结果为空时，程序直接开始正文生成。
+从右侧栏「插件 → DSH Tavern White Glove」配置当前对局。已安装的插件默认接管写作流程，白手套的模型默认跟随前台，也可以选择独立模型。关闭本局接管后，下一轮恢复原有生成流程。
+
+白手套查完直接结束。写作 Skill 与参考资料用于白手套本轮查询，世界书、记忆和变量的有效回执才交给前台。有回执时，程序将原文保存在当轮玩家输入与正文之间，后续请求随会话历史读取。查询结果为空时，程序直接开始正文生成。
 
 ## 测试
 
