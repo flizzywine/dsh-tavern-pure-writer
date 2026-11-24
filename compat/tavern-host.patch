@@ -149,6 +149,53 @@ index 61d5af4e6..8e518662e 100644
 -  return Object.freeze({ prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection: nativePlay.stageWorldbookSection })
 +  return Object.freeze({ prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection: nativePlay.stageWorldbookSection, pureWritingTurn: nativePlay.pureWritingTurn })
  }
+diff --git a/tavern-plugin/lib/domain/foreground-variable-changes.js b/tavern-plugin/lib/domain/foreground-variable-changes.js
+index dd054b17b..940500da3 100644
+--- a/tavern-plugin/lib/domain/foreground-variable-changes.js
++++ b/tavern-plugin/lib/domain/foreground-variable-changes.js
+@@ -36,11 +36,7 @@ function changedPaths(before, after, path = '', out = []) {
+   return out
+ }
+
+-/**
+- * The foreground writes without the variable state; settlement updates it afterwards.
+- * Before the next reply, hand back only what the last round changed, latest values.
+- */
+-export function lastRoundVariableChanges(chat) {
++function lastRoundChanges(chat) {
+   const messages = chat?.messages
+   if (!messages || !['story', 'script'].includes(chat.mode || 'story') || chat.mvu?.enabled !== true) return null
+   let latest = -1, previous = -1
+@@ -77,7 +73,20 @@ export function lastRoundVariableChanges(chat) {
+     for (const key of parts) value = value && typeof value === 'object' && Object.hasOwn(value, key) ? value[key] : undefined
+     changes.push([path, value, true])
+   }
+-  if (!changes.length) return null
++  return { changes, edited: editedPaths.length > 0 }
++}
++
++export function lastRoundVariableValues(chat) {
++  return (lastRoundChanges(chat)?.changes ?? []).map(([path, value]) => ({ names: pathParts(path), value }))
++}
++
++/**
++ * The foreground writes without the variable state; settlement updates it afterwards.
++ * Before the next reply, hand back only what the last round changed, latest values.
++ */
++export function lastRoundVariableChanges(chat) {
++  const { changes, edited } = lastRoundChanges(chat) ?? {}
++  if (!changes?.length) return null
+   const lines = []
+   let size = 0, omitted = 0
+   for (const [path, value, edited] of changes) {
+@@ -88,6 +97,6 @@ export function lastRoundVariableChanges(chat) {
+     size += line.length
+     lines.push(line)
+   }
+-  return promptSection('variable_changes', [editedPaths.length ? PROMPT_PROSE.p001 : PROMPT_PROSE.p002,
++  return promptSection('variable_changes', [edited ? PROMPT_PROSE.p001 : PROMPT_PROSE.p002,
+     ...lines, ...(omitted ? [PROMPT_PROSE.p003 + omitted + PROMPT_PROSE.p004] : [])].join('\n'))
+ }
 diff --git a/tavern-plugin/lib/domain/plugin-body-generation.js b/tavern-plugin/lib/domain/plugin-body-generation.js
 index 3ae0ecd9d..d0c82da98 100644
 --- a/tavern-plugin/lib/domain/plugin-body-generation.js
@@ -175,7 +222,7 @@ index 3ae0ecd9d..d0c82da98 100644
        const selected = { ...configured, ...await providers.controlRoute?.(gameId) }
        if (!selected.mode?.startsWith('plugin-')) return null
 diff --git a/tavern-plugin/lib/domain/plugin-task-execution.js b/tavern-plugin/lib/domain/plugin-task-execution.js
-index 3e45bef52..f16507c84 100644
+index 3e45bef52..16dfa015f 100644
 --- a/tavern-plugin/lib/domain/plugin-task-execution.js
 +++ b/tavern-plugin/lib/domain/plugin-task-execution.js
 @@ -63,7 +63,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
@@ -187,23 +234,31 @@ index 3e45bef52..f16507c84 100644
      const game = await requireGame(gameId)
      // A member of this plugin only (tavern.member): its resident Session, its queue.
      const memberId = member === undefined ? '' : pluginMemberId(owner, String(member))
-@@ -80,7 +80,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
+@@ -80,18 +80,23 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
      const byName = prefix ? prefix.tools : checkTools(tools)
      const callLimit = Number.isSafeInteger(Number(maxToolCalls)) ? Math.max(1, Math.min(32, Number(maxToolCalls))) : MAX_TOOL_CALLS_PER_TASK
      let calls = 0
 -    const call = async (name, args) => {
 +    const executeTool = async (name, args) => {
        const tool = byName.get(name)
-       if (!tool) return JSON.stringify({ ok: false, error: '没有这个工具：' + name })
-       if (++calls > callLimit) return JSON.stringify({ ok: false, error: '工具调用次数已达上限，请直接给出结果' })
-@@ -92,6 +92,11 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
-         return JSON.stringify({ ok: false, error: String(error?.message || error).slice(0, 500) })
+-      if (!tool) return JSON.stringify({ ok: false, error: '没有这个工具：' + name })
+-      if (++calls > callLimit) return JSON.stringify({ ok: false, error: '工具调用次数已达上限，请直接给出结果' })
++      if (!tool) return { text: JSON.stringify({ ok: false, error: '没有这个工具：' + name }) }
++      if (++calls > callLimit) return { text: JSON.stringify({ ok: false, error: '工具调用次数已达上限，请直接给出结果' }) }
+       try {
+         const value = await bounded(tool.execute(structuredClone(args ?? {})), '插件工具 ' + name)
+-        return (typeof value === 'string' ? value : JSON.stringify(value ?? { ok: true })).slice(0, MAX_TOOL_RESULT)
++        return { ok: true, text: (typeof value === 'string' ? value : JSON.stringify(value ?? { ok: true })).slice(0, MAX_TOOL_RESULT) }
+       } catch (error) {
+         recordError(game.sessionId, owner, '后台任务工具 ' + name, error)
+-        return JSON.stringify({ ok: false, error: String(error?.message || error).slice(0, 500) })
++        return { text: JSON.stringify({ ok: false, error: String(error?.message || error).slice(0, 500) }) }
        }
      }
 +    const call = (name, args) => {
 +      const result = executeTool(name, args)
 +      onToolResult?.(name, result)
-+      return result
++      return result.then(({ text }) => text)
 +    }
      try {
        const systemPrompt = prefix ? prefix.system : system
@@ -218,7 +273,7 @@ index 3e45bef52..f16507c84 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..d14e9a64b
+index 000000000..e9dfec802
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
 @@ -0,0 +1,61 @@
@@ -276,7 +331,7 @@ index 000000000..d14e9a64b
 +  if (material) messages.splice(messages.length - 1, 0, {
 +    id: frame.frameId + ':inject',
 +    role: 'user',
-+    content: [{ type: 'text', text: promptSection('writing_material', material) }],
++    content: [{ type: 'text', text: material }],
 +    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'inject' }
 +  })
 +  // Existing host protocol choices refer to the tool list that was replaced.
@@ -296,23 +351,119 @@ index fe0ae19bc..10f4c6f58 100644
        const turn = activeStoryTurn(session)
        if (turn === null) throw new Error('当前没有正在生成的游玩回合')
        const content = validContent(args?.content)
+diff --git a/tavern-plugin/lib/domain/writing-material-text.js b/tavern-plugin/lib/domain/writing-material-text.js
+new file mode 100644
+index 000000000..690f022cc
+--- /dev/null
++++ b/tavern-plugin/lib/domain/writing-material-text.js
+@@ -0,0 +1,66 @@
++import { marked } from 'marked'
++
++const FRONT_MATTER = /^(?:\uFEFF)?---[ \t]*\r?\n(?:[^\r\n]*\r?\n)*?---[ \t]*(?:\r?\n|$)/
++const PROSE_FENCE = /^(?:text|txt|plain|plaintext|md|markdown)$/i
++const TERMINAL_LINE = /^(?:\$\s+|PS\s+[^>]*>\s*|[\w.-]+@[\w.-]+[^$]*\$\s+|(?:命令行|终端命令|command)\s*[:：]|(?:git|npm|npx|pnpm|yarn|curl|bash|zsh|powershell|node|python3?|mkdir|cd)\s+\S|(?:ls|rm|cat|cp|mv|grep|rg|find|echo|open|brew)\s+[-~./\\]|(?:ls|pwd|whoami)$)/i
++const QUOTED_PATH = /(["'])(?:[a-z]:[/\\]|~[/\\]|\.{1,2}[/\\]|\/)[^"'<>]+\1/gi
++const PATH = /(?<![\p{L}\p{N}_.:/\\])(?:[a-z]:[/\\]|~[/\\]|\.{1,2}[/\\]|\/(?=[\p{L}\p{N}_.-])|(?:references|scripts|config|resources|node_modules)[/\\])[^\s"'`<>()[\]{}，。！？；、：]+/giu
++const FILE_NAME = /(?<![\p{L}\p{N}_.:/\\])(?:[\p{L}\p{N}_.-]+[/\\])*[\p{L}\p{N}_.-]+\.(?:jsonl?|ya?ml|toml|ini|conf|env|log|md|mjs|cjs|jsx?|tsx?|py|sh|ps1|bat|cmd|html|css|txt)\b/giu
++const PATH_LABEL = /^(?:目录|路径|文件路径|文件目录|参考文件|配置文件|file(?: path)?|directory)\s*[:：]/i
++
++function withoutJson(text) {
++  const starts = /\{(?=\s*["}])|\[(?=\s*(?:["{\[\d\-\]]|(?:true|false|null)\b))/g
++  const tokens = /"(?:[^"\\]|\\[\s\S])*"|[{}[\]]/g
++  let output = '', copiedTo = 0
++  for (let start; (start = starts.exec(text));) {
++    let depth = 1, token
++    tokens.lastIndex = starts.lastIndex
++    while (depth && (token = tokens.exec(text))) {
++      if (token[0] === '{' || token[0] === '[') depth++
++      if (token[0] === '}' || token[0] === ']') depth--
++    }
++    if (depth) break
++    const end = tokens.lastIndex
++    starts.lastIndex = end
++    try { JSON.parse(text.slice(start.index, end)) } catch { continue }
++    output += text.slice(copiedTo, start.index)
++    copiedTo = end
++  }
++  return output + text.slice(copiedTo)
++}
++
++function inlineText(tokens) {
++  return tokens.map(token => {
++    if (token.type === 'html' || token.type === 'image') return ''
++    if (token.type === 'codespan' && TERMINAL_LINE.test(token.text.trim())) return ''
++    if (token.type === 'br') return '\n'
++    return token.tokens ? inlineText(token.tokens) : token.text ?? token.raw
++  }).join('')
++}
++
++function proseBlocks(tokens) {
++  return tokens.map(token => {
++    if (token.type === 'code') return PROSE_FENCE.test(token.lang) ? token.text + '\n' : ''
++    if (token.type === 'def' || token.type === 'hr') return ''
++    if (token.type === 'space') return '\n'
++    if (token.type === 'blockquote') return proseBlocks(token.tokens)
++    if (token.type === 'list') return token.items.map(item => proseBlocks(item.tokens)).join('')
++    if (token.type === 'table') return [token.header, ...token.rows]
++      .map(row => row.map(cell => inlineText(cell.tokens)).join('　')).join('\n') + '\n'
++    return (token.tokens ? inlineText(token.tokens) : token.text ?? token.raw) + '\n'
++  }).join('')
++}
++
++export function writingMaterialText(value) {
++  const text = String(value ?? '').trimStart()
++  const source = text.replace(FRONT_MATTER, '')
++    .replace(/<!--[^]*?-->|<(script|style)\b[^>]*>[^]*?<\/\1\s*>/gi, '')
++  const prose = withoutJson(proseBlocks(marked.lexer(source)))
++  return prose.split(/\r?\n/).map(line => {
++    const text = line.trim()
++    if (TERMINAL_LINE.test(text) || /^[├└│]/.test(text)) return ''
++    const clean = text.replace(/<\/?[a-z][\w:-]*(?:\s[^<>]*)?\s*\/?>/gi, '')
++      .replace(QUOTED_PATH, '').replace(PATH, '').replace(FILE_NAME, '').trim()
++    return PATH_LABEL.test(text) && clean !== text ? '' : clean
++  }).join('\n').replace(/\n{3,}/g, '\n\n').trim()
++}
 diff --git a/tavern-plugin/lib/domain/writing-preparation-sources.js b/tavern-plugin/lib/domain/writing-preparation-sources.js
 new file mode 100644
-index 000000000..396c9e79e
+index 000000000..f019cba44
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation-sources.js
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,120 @@
 +import { frameUserInput } from './agent-input-frame.js'
-+import { lastRoundVariableChanges } from './foreground-variable-changes.js'
++import { lastRoundVariableValues } from './foreground-variable-changes.js'
 +import { canonicalTavernSkillName } from './tavern-skills.js'
 +import { classifyWorldbookEntry } from './worldbook-entry-classification.js'
 +import { isMvuUpdateEntry } from './worldbook-recall.js'
++import { writingMaterialText } from './writing-material-text.js'
 +
 +const BROWSE_LIMIT = 6
 +
 +const plainText = message => (message?.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n')
 +const normalize = value => String(value ?? '').toLocaleLowerCase()
 +const wordsOf = query => normalize(query).match(/[\p{L}\p{N}_-]+/gu) || []
++
++const publicVariable = name => !/^(?:\$|__|constructor$|prototype$)/.test(name)
++
++function describeVariable(names, value) {
++  if (!names.every(publicVariable)) return []
++  const labels = names.map(writingMaterialText)
++  return labels.every(Boolean) ? variableSentences(labels.join('的'), value) : []
++}
++
++function variableSentences(label, value) {
++  if (value === undefined) return [label + '已移除。']
++  if (value === null) return [label + '暂无记录。']
++  if (Array.isArray(value)) {
++    if (!value.length) return [label + '目前没有内容。']
++    return value.flatMap((item, index) => variableSentences(label + '的第 ' + (index + 1) + ' 项', item))
++  }
++  if (typeof value === 'object') return Object.entries(value).flatMap(([key, item]) => {
++    const name = publicVariable(key) && writingMaterialText(key)
++    return name ? variableSentences(label + '的' + name, item) : []
++  })
++  const text = typeof value === 'boolean' ? (value ? '是' : '否') : writingMaterialText(value)
++  return text ? [label + '为 ' + text + (/[。！？.!?]$/.test(text) ? '' : '。')] : []
++}
 +
 +function ranked(rows, query, fields) {
 +  const words = wordsOf(query)
@@ -357,8 +508,8 @@ index 000000000..396c9e79e
 +      skill: async ({ name, reference }) => {
 +        const skill = (await applicableSkills()).find(row => row.name === name)
 +        if (!skill) throw new Error('当前写作 Skill 不可用')
-+        const text = reference ? await tavernSkills.readReference(name, reference) : skill.content.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
-+        return [{ id: reference ? name + '/' + reference : name, title: reference || name, text }]
++        const text = reference ? await tavernSkills.readReference(name, reference) : skill.content
++        return [{ text }]
 +      },
 +      worldbook: async ({ query }) => {
 +        if (!wordsOf(query).length) throw new Error('世界书检索需要当前场景的关键词')
@@ -383,12 +534,15 @@ index 000000000..396c9e79e
 +      variables: async ({ query }) => {
 +        const state = context?.generationState
 +        const structured = state?.messageVariables?.stat_data || state?.variables?.stat_data || state?.variables
-+        const variables = Object.entries(structured || {}).filter(([key]) => !key.startsWith('$') && !key.startsWith('__')).map(([key, value]) =>
-+          ({ id: 'value:' + key, title: key, text: key + ' = ' + JSON.stringify(value) }))
++        const variables = Object.entries(structured || {}).flatMap(([key, value]) => {
++          const lines = describeVariable([key], value)
++          return lines.length ? [{ title: key, text: lines.join('\n') }] : []
++        })
 +        const posture = state?.posture
 +        if (posture) variables.unshift({ id: 'posture', title: '角色情况', text: posture })
 +        const current = await readHistory()
-+        const changes = current.regenInProgress ? '' : lastRoundVariableChanges(current)
++        const changes = current.regenInProgress ? '' : lastRoundVariableValues(current)
++          .flatMap(({ names, value }) => describeVariable(names, value)).join('\n')
 +        if (changes) variables.unshift({ id: 'changes', title: '上轮变量变化', text: changes })
 +        return ranked(variables, query, row => [row.title, row.text])
 +      }
@@ -397,20 +551,22 @@ index 000000000..396c9e79e
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..f18e52136
+index 000000000..b24fbc1af
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,100 @@
 +import { untilAborted } from './plugin-callback.js'
++import { writingMaterialText } from './writing-material-text.js'
 +
 +const SOURCE_LIMITS = {
-+  skill: { read: 6000, label: '写作 Skill' },
++  skill: { read: 6000, label: '写作指引' },
 +  worldbook: { read: 2800, label: '世界书' },
 +  memory: { read: 1600, label: '剧情记忆' },
 +  variables: { read: 5000, label: '当前变量' }
 +}
 +
 +const TIMEOUT_MS = 120000
++const NO_MATERIAL = '没有查到资料。'
 +
 +export function createWritingPreparation({ allowed, runAgent, readSources }) {
 +  const entries = new Map()
@@ -451,18 +607,19 @@ index 000000000..f18e52136
 +      const rows = await sourceReaders[kind](args ?? {})
 +      requestSignal.throwIfAborted()
 +      const text = rows.slice(0, 8).flatMap(row => {
-+        const text = String(row.text ?? '').trim().slice(0, limits.read)
-+        const title = String(row.title ?? '').slice(0, 120)
++        const text = writingMaterialText(row.text).slice(0, limits.read)
++        const title = writingMaterialText(row.title).slice(0, 120)
 +        return text ? ['【' + limits.label + (title ? ' · ' + title : '') + '】\n' + text] : []
 +      }).join('\n\n')
-+      return text || '没有查到资料。'
++      return text || NO_MATERIAL
 +    }
 +
 +    function inject(args = {}) {
 +      requestSignal.throwIfAborted()
 +      if (submitted) throw new Error('本轮已提交 inject')
 +      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('inject 不接收参数')
-+      submitted = untilAborted(Promise.all(toolResults), requestSignal).then(results => results.join('\n\n'))
++      submitted = untilAborted(Promise.all(toolResults), requestSignal).then(results =>
++        results.filter(result => result.ok && result.text !== NO_MATERIAL).map(result => result.text).join('\n\n'))
 +      return submitted.then(() => ({ accepted: true }))
 +    }
 +
@@ -668,7 +825,7 @@ index a607f42ee..3bc0a925b 100644
          return settings.storyInputToolCall === true || settings.storyOutputToolCall === true
        },
 diff --git a/tavern-plugin/lib/plugin-api.js b/tavern-plugin/lib/plugin-api.js
-index 14bdb2987..6259566fc 100644
+index 14bdb2987..314aeea82 100644
 --- a/tavern-plugin/lib/plugin-api.js
 +++ b/tavern-plugin/lib/plugin-api.js
 @@ -15,6 +15,7 @@ import path from 'node:path'
@@ -683,7 +840,7 @@ index 14bdb2987..6259566fc 100644
      return name
    }
    const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, guideSource: 1,
-+    ...(deps.writingSources ? { writingPreparation: 3 } : {}),
++    ...(deps.writingSources ? { writingPreparation: 4 } : {}),
      ...(deps.readTavernSettings && deps.updateTavernSettings ? { bodyGenerationDefaults: 1 } : {}),
      ...(deps.generationPresets ? { generationPresets: 1 } : {}),
      ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
