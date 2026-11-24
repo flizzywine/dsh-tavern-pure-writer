@@ -1,0 +1,18 @@
+{
+  "name": "dsh-tavern-pure-writer",
+  "version": "0.1.1",
+  "description": "纯净写作：前置 Agent 按需筛选资料，通过 inject 将相关片段交给前台正文生成。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "client.js", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "compatibility": { "tavernApiVersion": 8 }
+  },
+  "license": "MIT"
+}
