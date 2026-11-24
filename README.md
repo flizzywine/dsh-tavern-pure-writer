@@ -12,7 +12,7 @@
 
 ## 安装与更新
 
-**需要支持白手套接口 v6 的 DSH Tavern。** 目前可使用下文的宿主补丁准备 CLI 版，普通发行版需要先添加该接口。
+**需要支持白手套接口 v6 的 DSH Tavern。** CLI 用户可更新到包含 [白手套宿主支持](https://github.com/flizzywine/dsh-tavern/commit/d417c10458221a080358e107876c265dee2836ad) 的 `main` 构建。
 
 1. 打开酒馆「设置 → DSH Tavern → 插件」，粘贴本仓库地址 `https://github.com/flizzywine/dsh-tavern-white-glove`，点「安装」。
 2. 也可以下载 [v0.2.22 安装 ZIP](https://github.com/flizzywine/dsh-tavern-white-glove/releases/download/v0.2.22/dsh-tavern-white-glove.zip)，在同一处点「上传 ZIP」。
@@ -28,7 +28,7 @@
 
 ## 宿主兼容性
 
-插件需要白手套接口 v6。[宿主兼容补丁](compat/tavern-host.patch) 以 Tavern 提交 `3dd131c9e` 为基线，添加这个接口及对应的正文请求流程。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
+维护旧版 CLI 时，也可使用[宿主兼容补丁](compat/tavern-host.patch)。补丁以 Tavern 提交 `3dd131c9e` 为基线。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
 
 ```sh
 git -C /path/to/dsh-tavern apply --check /path/to/dsh-tavern-white-glove/compat/tavern-host.patch
