@@ -753,6 +753,102 @@ index 000000000..3659a59ca
 +  const { toolChoice, ...base } = request
 +  return { ...base, system: context.system, messages, tools: pureWritingTools(request.tools) }
 +}
+diff --git a/tavern-plugin/lib/domain/session-seed-trajectory.js b/tavern-plugin/lib/domain/session-seed-trajectory.js
+index b50b7dc72..2e3687228 100644
+--- a/tavern-plugin/lib/domain/session-seed-trajectory.js
++++ b/tavern-plugin/lib/domain/session-seed-trajectory.js
+@@ -1,14 +1,13 @@
+ import { ensureSessionSystemHead, sessionEvents, appendSessionEvent } from './session-events.js'
+
+ const VERSION = 1
+-const TEXT = Object.freeze([
+-  `我们正在共同创作一部持续发展的沉浸式虚构小说。
++const TEXT = Object.freeze({
++  1: `我们正在共同创作一部持续发展的沉浸式虚构小说。
+ 人物卡、世界书、已有正文和现场状态构成故事事实；我之后发送的消息是“本轮演出指引”，不是已经发生的正文。
+ 请承接现场，用自己的叙述完整演出其核心意图。所有角色都由你叙述和扮演，并保持符合人设的独立意志。
+ 只输出小说正文，不要解释、点评、复述规则或输出元信息。`,
+-  '明白。后续我会把人物卡、世界书和已有正文视为连续的故事世界，把最新消息视为本轮演出指引，并将其重新组织成完整场景。人物会依照自身性格行动和回应。我只输出小说正文。',
+-  '开始。请从人物卡给定的开场继续。'
+-])
++  3: '开始。请从人物卡给定的开场继续。'
++})
+
+ const pending = new WeakMap()
+
+@@ -16,40 +15,23 @@ function str(value) {
+   return value === undefined || value === null ? '' : String(value)
+ }
+
+-function id(sessionId, index) {
+-  return 'tavern-seed-trajectory:v' + VERSION + ':' + str(sessionId) + ':' + (index + 1)
+-}
+-
+-function userMessage(sessionId, index, texts) {
+-  return {
+-    id: id(sessionId, index),
+-    role: 'user',
+-    content: [{ type: 'text', text: texts[index] }],
+-    source: { kind: 'plugin:dsh-tavern', form: 'synthetic-trajectory', version: VERSION }
+-  }
+-}
+-
+-function assistantMessage(sessionId, index, texts) {
+-  return {
+-    id: id(sessionId, index),
+-    role: 'assistant',
+-    content: [{ type: 'text', text: texts[index] }],
+-    source: { kind: 'model', provider: 'dsh-tavern', model: 'synthetic-trajectory', version: VERSION }
+-  }
++export function isLegacySeedAcknowledgement(message) {
++  const source = message?.source
++  return message?.role === 'assistant' && source?.kind === 'model' && source.provider === 'dsh-tavern'
++    && source.model === 'synthetic-trajectory' && /^tavern-seed-trajectory:v1:.+:2$/.test(message.id)
+ }
+
+ export function sessionSeedTrajectoryMessages(sessionId) {
+-  const texts = TEXT
+-  const userOne = userMessage(sessionId, 0, texts)
+-  const assistant = assistantMessage(sessionId, 1, texts)
+-  const userTwo = userMessage(sessionId, 2, texts)
+-  return Object.freeze([
+-    Object.freeze({ text: texts[0], type: 'user/message', data: userOne, intent: { surfaceOp: 'append' } }),
+-    Object.freeze({ text: texts[1], type: 'assistant/message', data: {
+-      turn: 1, step: 1, message: assistant
+-    }, intent: { surfaceOp: 'append', sourceEventSeqs: [] } }),
+-    Object.freeze({ text: texts[2], type: 'user/message', data: userTwo, intent: { surfaceOp: 'append' } })
+-  ])
++  // Keep the original slots so opening recovery can recognize partially seeded saves.
++  return Object.freeze(Object.entries(TEXT).map(([slot, text]) => Object.freeze({
++    text, type: 'user/message', intent: { surfaceOp: 'append' },
++    data: {
++      id: 'tavern-seed-trajectory:v' + VERSION + ':' + str(sessionId) + ':' + slot,
++      role: 'user',
++      content: [{ type: 'text', text }],
++      source: { kind: 'plugin:dsh-tavern', form: 'synthetic-trajectory', version: VERSION }
++    }
++  })))
+ }
+
+ function messageId(event) {
+@@ -59,14 +41,15 @@ function messageId(event) {
+ }
+
+ function visibleEvents(session) {
+-  return sessionEvents(session).filter(event => event && event.type !== 'session/end-seed')
++  return sessionEvents(session).filter(event => event && event.type !== 'session/end-seed'
++    && !(event.type === 'assistant/message' && isLegacySeedAcknowledgement(event.data?.message)))
+ }
+
+ function ensure(session) {
+   if (!session || typeof session.append !== 'function' || str(session.id) === '') throw new Error('无法写入 Session 种子轨迹')
+   ensureSessionSystemHead(session)
+   const stages = sessionSeedTrajectoryMessages(session.id)
+-  const expectedIds = stages.map((_, index) => id(session.id, index))
++  const expectedIds = stages.map(stage => stage.data.id)
+   const events = visibleEvents(session)
+   const start = events.findIndex(event => messageId(event) === expectedIds[0])
+   const stray = events.findIndex(event => expectedIds.includes(messageId(event)))
 diff --git a/tavern-plugin/lib/domain/story-tool-submission.js b/tavern-plugin/lib/domain/story-tool-submission.js
 index fe0ae19bc..10f4c6f58 100644
 --- a/tavern-plugin/lib/domain/story-tool-submission.js
@@ -1262,20 +1358,21 @@ index 000000000..28e8c506c
 +  })
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
-index 442447f8f..b592a28dc 100644
+index 442447f8f..6385800b7 100644
 --- a/tavern-plugin/lib/hooks/model-stream.js
 +++ b/tavern-plugin/lib/hooks/model-stream.js
-@@ -6,7 +6,9 @@ import { createStoryCompactionRequest, nativelyRetainedRounds, retainRecentStory
+@@ -6,7 +6,10 @@ import { createStoryCompactionRequest, nativelyRetainedRounds, retainRecentStory
  import { installCompactionRequestProjection } from '../domain/compaction-request.js'
  import { installPrefixBoundReasoningProjection } from '../domain/prefix-bound-reasoning.js'
  import { omitEmptyProviderContent } from '../domain/provider-message-content.js'
 +import { omitUnusedToolHistory } from '../domain/tool-history-presentation.js'
++import { isLegacySeedAcknowledgement } from '../domain/session-seed-trajectory.js'
  import { installWorkspaceInstructionPresentation } from '../domain/workspace-instruction-presentation.js'
 +import { isTavernAgentSession } from '../domain/tavern-agent-scope.js'
  import { presentModelError } from '../domain/model-error-presentation.js'
  import { markRequestHandled, requestHandledBy } from '../domain/request-lineage.js'
  import { bodyGenerationFailure } from '../domain/body-generation-failure.js'
-@@ -14,6 +16,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
+@@ -14,6 +17,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
  import { STORY_CONTEXT_TOOL_NAME, STORY_SUBMIT_TOOL_NAME } from '../domain/story-tool-submission.js'
  import { isAutoToolOnlyModel, runWithToolProtocolDirective } from '../domain/tool-protocol-enforcement.js'
  import { createToolReplyStreamTracker } from '../domain/tool-reply-stream-parser.js'
@@ -1283,7 +1380,7 @@ index 442447f8f..b592a28dc 100644
  
  // Prompt prose source. Keys are stable; interpolation arguments are data.
  export const PROMPT_PROSE = Object.freeze({
-@@ -29,6 +32,23 @@ export function applyCompactionModel(request, selection) {
+@@ -29,6 +33,23 @@ export function applyCompactionModel(request, selection) {
    return next
  }
 
@@ -1307,8 +1404,16 @@ index 442447f8f..b592a28dc 100644
  export function registerModelStreamHooks({
    agentRegistry,
    pluginBodyGeneration,
-@@ -77,10 +97,10 @@ export function registerModelStreamHooks({
+@@ -75,12 +96,18 @@ export function registerModelStreamHooks({
+   // Whether a session is a Tavern game: its header answers that, not its history.
+   const isGame = async sessionId => Boolean(await chatHeaderForSession(str(sessionId), []))
    const ownsSession = async sessionId => backgroundAgentRunner.owns(sessionId) || await isGame(sessionId)
++  // Old saves still carry the scripted acknowledgement. Drop it before
++  // history projection and compaction can incorporate it into another message.
++  ctx.on('llm/stream', (request, next) => {
++    if (!request?.messages?.some(isLegacySeedAcknowledgement)) return next()
++    return ctx.llm.stream({ ...request, messages: request.messages.filter(message => !isLegacySeedAcknowledgement(message)) })
++  }, { prepend: true })
    // Compaction keeps its newest replies after the summary, behind a prefix they were not signed against.
    installPrefixBoundReasoningProjection(ctx, { ownsSession, session: id => sessionStore.get(id) || agentRegistry.get(id)?.session || backgroundAgentRunner.requestSession(id) })
 -  installWorkspaceInstructionPresentation(ctx, async sessionId => {
@@ -1322,7 +1427,7 @@ index 442447f8f..b592a28dc 100644
    installCompactionRequestProjection(ctx, ownsSession, async request => {
      // 前台对话压缩优先使用全局设置的专用压缩模型；后台 Agent 保持各自任务模型。
      const foreground = !backgroundAgentRunner.owns(request.sessionId)
-@@ -156,12 +176,24 @@ export function registerModelStreamHooks({
+@@ -156,12 +183,24 @@ export function registerModelStreamHooks({
          source: { kind: 'model', provider: str(options.provider), model: str(options.model) }
        }))
      }
@@ -1350,7 +1455,7 @@ index 442447f8f..b592a28dc 100644
          const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
          const direct = await pluginBodyGeneration.direct(session, options.signal)
          if (direct) { yield * direct; return }
-@@ -169,12 +201,12 @@ export function registerModelStreamHooks({
+@@ -169,12 +208,12 @@ export function registerModelStreamHooks({
        // a director already owns frozen, projected sources.
        const director = backgroundContext?.task === 'stage-director'
        if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -1365,7 +1470,7 @@ index 442447f8f..b592a28dc 100644
          const projected = await fullTemplateRuntime.forSession(ownerSessionId).projectRequestProjection({ messages: options.messages, system: options.system, model: options.model })
          yield * ctx.llm.stream(markRequestHandled({ ...options, ...projected }, 'full-template'))
          return
-@@ -185,7 +217,7 @@ export function registerModelStreamHooks({
+@@ -185,7 +224,7 @@ export function registerModelStreamHooks({
        // Templates can erase text after the history projection. Check the final
        // Tavern request before recording it or starting the downstream stream.
        if (chat || backgroundContext || child || requestHandledBy(options, 'compaction-projection')) {
@@ -1374,7 +1479,7 @@ index 442447f8f..b592a28dc 100644
          if (cleaned !== options) { yield * ctx.llm.stream(cleaned); return }
        }
        const baseDirective = options.purpose === undefined ? toolProtocolDirectiveOf(options) : null
-@@ -264,6 +296,7 @@ export function registerModelStreamHooks({
+@@ -264,6 +303,7 @@ export function registerModelStreamHooks({
            })
          : null
        let finish = null, usage = null
@@ -1382,7 +1487,7 @@ index 442447f8f..b592a28dc 100644
        // 改写补出来的 text-delta 要沿用同一段正文的 index，assembler 靠它把 token 并进同一个正文块。
        let rewriteIndex = null
        let failure = null, interrupted = false
-@@ -277,6 +310,10 @@ export function registerModelStreamHooks({
+@@ -277,6 +317,10 @@ export function registerModelStreamHooks({
            if (item.done) {exhausted = true; break}
            let chunk = item.value
            liveness.chunk(chunk)
@@ -1393,7 +1498,7 @@ index 442447f8f..b592a28dc 100644
            if (chunk && chunk.type === 'text-delta') {
              const delta = str(chunk.text)
              if (rewriteStream) {
-@@ -354,7 +391,7 @@ export function registerModelStreamHooks({
+@@ -354,7 +398,7 @@ export function registerModelStreamHooks({
          if (owner && requestRecord) {
            // complete() 内部同步进入 chatId 写盘队列，evidence()/settled() 会自动等待落盘，
            // 无需在流结束 finally 阻塞主回合提交。
@@ -1921,6 +2026,63 @@ index c25ed55ed..ca941e098 100644
  				try { record.binding.rebuild() }
  				catch (_) {}
  			}
+diff --git a/tests/conversation-initialization.test.mjs b/tests/conversation-initialization.test.mjs
+index 1330c0923..021a95dd5 100644
+--- a/tests/conversation-initialization.test.mjs
++++ b/tests/conversation-initialization.test.mjs
+@@ -3,6 +3,7 @@ import test from 'node:test'
+ import { initializationFixture } from './fixtures/conversation-initialization.mjs'
+
+ import { createUserPreferenceProfile } from '../tavern-plugin/lib/domain/user-preference-profile.js'
++import { ensureSessionSeedTrajectory, sessionSeedTrajectoryMessages } from '../tavern-plugin/lib/domain/session-seed-trajectory.js'
+
+ const messages = session => session.events.filter(event => event.type === 'assistant/message' && event.data?.message?.source?.model === 'character-card')
+
+@@ -11,6 +12,30 @@ const seedMessages = session => session.events.filter(event => {
+   return source?.form === 'synthetic-trajectory' || source?.model === 'synthetic-trajectory'
+ })
+
++test('新开局保留人物卡开场，种子轨迹只写用户消息', async () => {
++  const h = initializationFixture()
++  await h.make().start(h.input)
++  const session = h.session()
++  assert.deepEqual(seedMessages(session).map(event => event.type), ['user/message', 'user/message'])
++  assert.equal(messages(session).length, 1)
++})
++
++test('半写入的旧种子轨迹可以续接，模拟助手回复不会使恢复重复写入', async () => {
++  const session = initializationFixture().session()
++  await ensureSessionSeedTrajectory(session)
++  const [first, last] = sessionSeedTrajectoryMessages(session.id)
++  session.events.pop()
++  session.append('assistant/message', { message: {
++    id: 'tavern-seed-trajectory:v1:session:2', role: 'assistant',
++    source: { kind: 'model', provider: 'dsh-tavern', model: 'synthetic-trajectory' }
++  } })
++  const recovered = await ensureSessionSeedTrajectory(session)
++  assert.deepEqual(recovered.events.map(event => event.data.id), [first.data.id, last.data.id])
++  const before = structuredClone(session.events)
++  await ensureSessionSeedTrajectory(session)
++  assert.deepEqual(session.events, before)
++})
++
+ test('新局默认少量候选，修改开局默认只影响之后创建的对局', async () => {
+   const h = initializationFixture()
+   const first = await h.make().start(h.input)
+diff --git a/tests/foreground-orchestration-strategies.test.mjs b/tests/foreground-orchestration-strategies.test.mjs
+index 22188149c..601943541 100644
+--- a/tests/foreground-orchestration-strategies.test.mjs
++++ b/tests/foreground-orchestration-strategies.test.mjs
+@@ -82,7 +82,8 @@ test('游玩固定背景来自原生系统装配，预设前后段保持顺序
+     assert.match(system, /^预设前置指令\n人物卡固定基本信息/)
+     assert.equal(prepared.startsRequestSeries, turn === 2 ? true : undefined, '首次或预设前段变化时才开始新请求序列')
+     const request = run.value.projectRequest({ sessionId: 'native', system, messages: modelMessages })
+-    assert.deepEqual(request.messages.map(message => message.role), ['user', 'assistant', 'user'])
++    assert.deepEqual(request.messages.map(message => message.role), ['user'])
++    assert.match(request.messages[0].content.map(block => block.text).join('\n'), /我们正在共同创作[\s\S]*开始。请从人物卡给定的开场继续。/)
+     assert.equal(request.system, system, '系统提示原样保留，不再在请求边界拆分')
+     assert.equal(request.messages.at(-1).role, 'user', '本轮指令和预设后段保持 user 语义')
+     assert.match(request.messages.at(-1).content[0].text, /本轮动态指令\n\n预设后置指令$/)
 diff --git a/tests/model-request-log.test.mjs b/tests/model-request-log.test.mjs
 index cf0db63ea..0a26da30c 100644
 --- a/tests/model-request-log.test.mjs
@@ -1946,7 +2108,7 @@ index cf0db63ea..0a26da30c 100644
    const fixture = storageFixture()
    let sequence = 0
 diff --git a/tests/plugin-agent-request-log.test.mjs b/tests/plugin-agent-request-log.test.mjs
-index d1440acbc..e9de604cf 100644
+index d1440acbc..e15558e79 100644
 --- a/tests/plugin-agent-request-log.test.mjs
 +++ b/tests/plugin-agent-request-log.test.mjs
 @@ -28,7 +28,7 @@ test('Tavern sends and logs the same request after a template renders blank prom
@@ -1958,14 +2120,17 @@ index d1440acbc..e9de604cf 100644
        yield { type: 'finish', reason: { kind: 'stop' } }
      }
    })
-@@ -50,17 +50,24 @@ test('Tavern sends and logs the same request after a template renders blank prom
+@@ -50,17 +50,27 @@ test('Tavern sends and logs the same request after a template renders blank prom
    })
    const hidden = { role: 'user', content: [{ type: 'text', text: '<% if (false) { %>旧提示<% } %>' }] }
    const visible = { role: 'user', content: [{ type: 'text', text: '继续故事' }] }
 -  const original = Object.freeze({ sessionId, provider: 'initialization-fixture', model: 'text', system: '模板规则', messages: Object.freeze([hidden, visible]) })
++  const oldSeed = { id: 'tavern-seed-trajectory:v1:' + sessionId + ':2', role: 'assistant',
++    source: { kind: 'model', provider: 'dsh-tavern', model: 'synthetic-trajectory' },
++    content: [{ type: 'text', text: '模拟的开局确认。' }] }
 +  const tools = [{ name: 'submit_story', description: 'Save story', parameters: { type: 'object' } }]
 +  const toolHistory = { tools: [{ name: 'bash', description: 'Old tool', parameters: { type: 'object' } }], updates: [] }
-+  const original = Object.freeze({ sessionId, provider: 'initialization-fixture', model: 'text', system: '模板规则', messages: Object.freeze([hidden, visible]),
++  const original = Object.freeze({ sessionId, provider: 'initialization-fixture', model: 'text', system: '模板规则', messages: Object.freeze([oldSeed, hidden, visible]),
 +    tools, toolHistory })
    const before = structuredClone(original)
    const events = await Array.fromAsync(h.ctx.llm.stream(original))
@@ -2121,6 +2286,25 @@ index d98408ffb..b5b745b5f 100644
  test('故事模式下未物化的旧回合不构建 chat 节点，返回 null 且不调用原生 buildNode', () => {
  	const h = harness()
  	assert.equal(h.instance.binding('s1'), h.binding)
+diff --git a/tests/tavern-token-meter-native.test.mjs b/tests/tavern-token-meter-native.test.mjs
+index f66854e79..c9271fd7d 100644
+--- a/tests/tavern-token-meter-native.test.mjs
++++ b/tests/tavern-token-meter-native.test.mjs
+@@ -37,7 +37,13 @@ test('原生 Token Meter 可统计既有无 step 的 Tavern 种子消息，且
+   // opening turn. The meter patch must still measure them without rewriting.
+   appendSessionEvent(session, 'system/message', { turn: 1, step: 1, message: {
+     id: 'tavern-system-head:' + session.id, role: 'system', content: [], source: { kind: 'system-prompt' } } }, { surfaceOp: 'append' })
+-  for (const stage of sessionSeedTrajectoryMessages(session.id)) appendSessionEvent(session, stage.type, stage.data, stage.intent)
++  const [first, last] = sessionSeedTrajectoryMessages(session.id)
++  appendSessionEvent(session, first.type, first.data, first.intent)
++  appendSessionEvent(session, 'assistant/message', { turn: 1, step: 1, message: {
++    id: 'tavern-seed-trajectory:v1:' + session.id + ':2', role: 'assistant', content: [{ type: 'text', text: '旧版开局确认。' }],
++    source: { kind: 'model', provider: 'dsh-tavern', model: 'synthetic-trajectory' }
++  } }, { surfaceOp: 'append' })
++  appendSessionEvent(session, last.type, last.data, last.intent)
+   const before = JSON.stringify(session.snapshotEvents())
+   assert.throws(() => ctx.tokenMeter.measure(session), /assistant\/message.*no matching step\/start/)
+   const eventAt = session.eventAt
 diff --git a/tests/workspace-instruction-presentation.test.mjs b/tests/workspace-instruction-presentation.test.mjs
 index 371f15d1d..514af0b00 100644
 --- a/tests/workspace-instruction-presentation.test.mjs
