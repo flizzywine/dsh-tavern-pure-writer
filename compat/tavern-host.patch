@@ -399,7 +399,7 @@ index 13631f301..ac8a6c954 100644
    // 认不出来时模板同步会把压缩摘要改写成玩家原文，而在压缩之外替换检查点的存档，
    // DSH 重启后会拒绝加载（compaction checkpoint has no matching compaction/start）。
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-index 61d5af4e6..510c91ec6 100644
+index 61d5af4e6..9b851051c 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 +++ b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 @@ -1,5 +1,5 @@
@@ -449,7 +449,7 @@ index 61d5af4e6..510c91ec6 100644
 +      agentMessages = replaceTurnInput(agentMessages, frameUserInput(frame).projectedText)
 +      const fixed = [
 +        ...presetFrontSections(snapshot),
-+        ...pureWritingFixedSections(sessionStablePrefixSections(payload.agent.session))
++        ...pureWritingFixedSections(sessionStablePrefixSections(payload.agent.session), frame)
 +      ]
 +      const system = pureWritingSystem(fixed, frame, snapshot?.back?.entries)
 +      stagedRequests.set(sessionId, { pureWriter, frame, system, chat: input.chat, session: payload.agent.session })
@@ -710,13 +710,14 @@ index 3e45bef52..f7ff36cf6 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..cf3e60597
+index 000000000..bd96776ab
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,91 @@
 +import { isCompactionCheckpointMessage } from './compaction-checkpoint.js'
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
++import { withCurrentWorldbook } from './session-stable-prefix.js'
 +import { STORY_SUBMIT_TOOL_NAME } from './story-tool-submission.js'
 +import { stripWritingSystemReminders, writingRequestMessages } from './writing-system-reminders.js'
 +import receipts from './writing-material-receipts.cjs'
@@ -724,7 +725,7 @@ index 000000000..cf3e60597
 +export const PURE_WRITING_REQUEST = 'pure-writing'
 +export const WRITING_PREPARATION_REQUEST = 'writing-preparation'
 +
-+const KEEP_FIXED_SECTIONS = new Set(['tavern:user-preference', 'tavern:character-card'])
++const KEEP_FIXED_SECTIONS = new Set(['tavern:user-preference', 'tavern:character-card', 'tavern:constant-worldbook'])
 +const STORY_SECTIONS = new Set(['base', 'card', 'card-instruction', 'script', 'guide'])
 +const { tavernIsWritingInjection, tavernWithoutInjectedSkills } = receipts
 +
@@ -732,8 +733,11 @@ index 000000000..cf3e60597
 +  return (tools || []).filter(tool => tool?.name === STORY_SUBMIT_TOOL_NAME)
 +}
 +
-+export function pureWritingFixedSections(sections) {
-+  return sections.filter(section => KEEP_FIXED_SECTIONS.has(section.name))
++export function pureWritingFixedSections(sections, frame) {
++  const fixed = sections.filter(section => KEEP_FIXED_SECTIONS.has(section.name))
++  const prefix = frame?.source?.regenerationMaterials?.worldbookPrefix
++  // A prepared empty prefix also supersedes the opening snapshot.
++  return typeof prefix === 'string' ? withCurrentWorldbook(fixed, prefix) : fixed
 +}
 +
 +/** Keep the native story history, including prose carried over by compaction. */
@@ -1168,10 +1172,10 @@ index 000000000..19cdc7d9a
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation-sources.js b/tavern-plugin/lib/domain/writing-preparation-sources.js
 new file mode 100644
-index 000000000..2a9decb03
+index 000000000..d2fbf1282
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation-sources.js
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,112 @@
 +import { lastRoundVariableValues } from './foreground-variable-changes.js'
 +import { canonicalTavernSkillName } from './tavern-skills.js'
 +import { classifyWorldbookEntry } from './worldbook-entry-classification.js'
@@ -1250,7 +1254,9 @@ index 000000000..2a9decb03
 +        const rendered = new Map((context?.worldbookEntries || []).map(row => [row.ref, row.text]))
 +        const rows = ((await worldbook)?.view?.entries || []).flatMap(entry => {
 +          if (entry.enabled === false || isMvuUpdateEntry(entry)) return []
-+          const text = rendered.get(entry.ref) ?? (classifyWorldbookEntry(entry).dynamic ? '' : entry.content)
++          const classification = classifyWorldbookEntry(entry)
++          if (classification.kind === 'static-constant' && context?.worldbookPrefix?.includes(entry.content)) return []
++          const text = rendered.get(entry.ref) ?? (classification.dynamic ? '' : entry.content)
 +          return text?.trim() ? [{ id: entry.ref, title: entry.title || entry.comment, keys: [...(entry.keys || []), ...(entry.secondaryKeys || [])], text }] : []
 +        })
 +        return ranked(rows, query, row => [[row.title, ...row.keys].join(' '), row.text]).map(({ keys, ...row }) => row)

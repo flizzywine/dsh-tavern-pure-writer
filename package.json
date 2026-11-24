@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-pure-writer",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "description": "白手套 Agent 查询写作资料，酒馆自动将自然语言回执交给前台 Agent。",
   "type": "module",
   "main": "lib/index.js",

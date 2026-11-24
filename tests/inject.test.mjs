@@ -11,7 +11,7 @@ const { createWritingPreparation } = await domain('writing-preparation.js')
 const { createWritingPreparationSources } = await domain('writing-preparation-sources.js')
 const { createPluginTaskExecution } = await domain('plugin-task-execution.js')
 const { createNativePlayOrchestrationStrategy } = await domain('foreground-orchestration-strategies.js')
-const { projectPureWritingRequest, projectWritingPreparationRequest, pureWritingContext, pureWritingInjection } = await domain('pure-writing-request.js')
+const { projectPureWritingRequest, projectWritingPreparationRequest, pureWritingContext, pureWritingFixedSections, pureWritingInjection } = await domain('pure-writing-request.js')
 const { registerModelStreamHooks } = await import(pathToFileURL(resolve(host, 'tavern-plugin/lib/hooks/model-stream.js')))
 const frame = { frameId: 'frame:writing', turn: 3, contributions: [], source: {} }
 const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '去钟楼' }] }
@@ -34,6 +34,33 @@ function createFixture(readers, runTask, requestContext = context, requestFrame 
   apply({ tavern: { capabilities: { writingPreparation: 5 }, writingPreparation: value => preparation.register('pure-writer', value) } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext, frame: requestFrame })
 }
+
+test('本轮常驻世界书替代开局快照，显式清空时不会恢复旧内容', () => {
+  const old = { name: 'tavern:constant-worldbook', text: '<lorebook_constant>\n旧设定\n</lorebook_constant>' }
+  const card = { name: 'tavern:character-card', text: '人物设定' }
+  const fixed = [card, old, { name: 'tavern:worldbook-skills', text: '工具说明' }]
+  const frameWith = worldbookPrefix => ({ ...frame, source: { regenerationMaterials: { worldbookPrefix } } })
+  assert.deepEqual(pureWritingFixedSections(fixed, frameWith('本轮设定')), [
+    { ...old, text: '<lorebook_constant>\n本轮设定\n</lorebook_constant>' }, card
+  ])
+  assert.deepEqual(pureWritingFixedSections(fixed, frameWith('')), [card])
+  assert.deepEqual(pureWritingFixedSections(fixed, frame), [card, old])
+})
+
+test('白手套查询跳过已经随系统发出的常驻原文，保留同一关键词的其他条目', async () => {
+  const constant = { ref: 'constant', title: '钟楼常驻', constant: true, content: '塔钟在整点响。' }
+  const optional = { ref: 'optional', title: '钟楼夜间', content: '夜里从侧门进入。' }
+  const makeSources = createWritingPreparationSources({
+    chatForSession: async () => ({ messages: [] }),
+    worldbookForChat: async () => ({ view: { entries: [constant, optional] } })
+  })
+  const read = worldbookPrefix => makeSources({
+    gameId: 'game', frame: { ...frame, source: { regenerationMaterials: { worldbookPrefix } } },
+    signal: new AbortController().signal
+  }).worldbook({ query: '钟楼' })
+  assert.deepEqual((await read(constant.content)).map(row => row.id), ['optional'])
+  assert.deepEqual((await read('修改前的常驻原文。')).map(row => row.id), ['constant', 'optional'])
+})
 
 test('世界书标题提示接在白手套共享历史后，前台只收到查询原文', async () => {
   const hints = '<lorebook_title_hints>\n可能用到的世界书条目：钟楼、城墙\n</lorebook_title_hints>'
@@ -187,7 +214,10 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
     modeFor: async () => 'story',
     resolvePreset: async () => null,
     prepareTurn: async ({ turn }) => ({ frame: { ...frame, turn, frameId: frame.frameId + ':' + turn,
-      userInput: { sourceText: turn === 3 ? '去钟楼' : '离开钟楼' }, source: { card: { systemPromptText: '用第三人称写钟楼故事。' } } } }),
+      userInput: { sourceText: turn === 3 ? '去钟楼' : '离开钟楼' }, source: {
+        card: { systemPromptText: '用第三人称写钟楼故事。' },
+        regenerationMaterials: { worldbookPrefix: '钟楼每晚向村民开放。' }
+      } } }),
     recordFrame: () => {},
     writingPreparation: {
       forGame: async () => ({}),
@@ -213,6 +243,8 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
   }, shared)
   assert.match(preparation.system, /用第三人称写钟楼故事/)
   assert.equal(preparation.system, foreground.system)
+  assert.match(foreground.system, /<lorebook_constant>\n钟楼每晚向村民开放。\n<\/lorebook_constant>/)
+  assert.doesNotMatch(JSON.stringify(foreground.messages), /钟楼每晚向村民开放/)
   assert.deepEqual(preparation.messages.slice(0, -2), [checkpoint, ...history, player])
   assert.doesNotMatch(JSON.stringify({ preparation, foreground }), /交付本轮完整正文/)
   assert.deepEqual(foreground.messages.slice(0, -1), preparation.messages.slice(0, -2))
