@@ -67,9 +67,11 @@ test('世界书标题提示接在白手套共享历史后，前台只收到查�
   const hintFrame = { ...frame, context: { worldbookTitleHints: hints } }
   const taskNote = { id: 'task-note', role: 'user', source: { kind: 'plugin:dsh-tavern', form: 'writing-preparation-task' } }
   const prepare = createFixture({ worldbook: () => [{ title: '钟楼', text: '塔钟在整点响。' }] }, async task => {
-    const request = projectWritingPreparationRequest({ messages: [taskNote] }, task.writingPreparation)
+    const currentHint = task.writingPreparation.worldbookTitleHints
+    const olderHint = { ...currentHint, id: 'old-hint', content: [{ type: 'text', text: '旧标题提示。' }] }
+    const request = projectWritingPreparationRequest({ messages: [olderHint, currentHint, taskNote] }, task.writingPreparation)
     assert.equal(request.system, context.system)
-    assert.deepEqual(request.messages.slice(0, -2), context.messages)
+    assert.deepEqual(request.messages, [...context.messages, currentHint, taskNote])
     assert.equal(request.messages.at(-2).source.form, 'worldbook-title-hints')
     assert.equal(request.messages.at(-2).content[0].text, hints)
     assert.deepEqual(request.messages.at(-1), taskNote)
