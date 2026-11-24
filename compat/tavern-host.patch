@@ -183,7 +183,7 @@ index 13631f301..ac8a6c954 100644
    // 认不出来时模板同步会把压缩摘要改写成玩家原文，而在压缩之外替换检查点的存档，
    // DSH 重启后会拒绝加载（compaction checkpoint has no matching compaction/start）。
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-index 61d5af4e6..5a2c8b4aa 100644
+index 61d5af4e6..b748a9b7e 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 +++ b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 @@ -1,6 +1,7 @@
@@ -279,7 +279,7 @@ index 61d5af4e6..5a2c8b4aa 100644
 +    if (!staged?.pureWriter) throw new Error('本轮写作上下文已失效')
 +    const { frame } = staged
 +    const messages = projectLegacyOpeningSources(projectRegenerationRequestMessages(request.messages))
-+    const context = pureWritingContext(staged.system, messages, frame.frameId)
++    const context = pureWritingContext(staged.system, messages)
 +    if (!isDeepStrictEqual(staged.preparation?.context, context)) {
 +      const material = options.writingPreparation.prepare(staged.pureWriter, {
 +        gameId: sessionId, frame, chat: staged.chat, signal: request.signal, context
@@ -468,10 +468,10 @@ index 3e45bef52..f7ff36cf6 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..79b7d55b1
+index 000000000..7b3b0208e
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,79 @@
 +import { isCompactionCheckpointMessage } from './compaction-checkpoint.js'
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
@@ -520,16 +520,11 @@ index 000000000..79b7d55b1
 +  return [...sections, ...back.map(entry => entry.content)].filter(Boolean).join('\n\n')
 +}
 +
-+export function pureWritingContext(system, messages, frameId) {
++export function pureWritingContext(system, messages) {
 +  const conversation = writingConversation(writingRequestMessages(messages || []))
 +  const inputAt = conversation.findLastIndex(message => message.role === 'user' && inputKind(message))
 +  if (inputAt < 0) throw new Error('纯净写作找不到本轮玩家输入')
-+  return { system: stripWritingSystemReminders(system), messages: [...structuredClone(conversation.slice(0, inputAt + 1)), {
-+    id: frameId + ':write',
-+    role: 'user',
-+    content: [{ type: 'text', text: OUTPUT }],
-+    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' }
-+  }] }
++  return { system: stripWritingSystemReminders(system), messages: structuredClone(conversation.slice(0, inputAt + 1)) }
 +}
 +
 +export function projectWritingPreparationRequest(request, context) {
@@ -539,6 +534,12 @@ index 000000000..79b7d55b1
 +
 +export function projectPureWritingRequest(request, { context, material, frame }) {
 +  const messages = structuredClone(context.messages)
++  messages.push({
++    id: frame.frameId + ':write',
++    role: 'user',
++    content: [{ type: 'text', text: OUTPUT }],
++    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' }
++  })
 +  const text = stripWritingSystemReminders(material || '')
 +  if (text.trim()) messages.push({
 +    id: frame.frameId + ':inject',

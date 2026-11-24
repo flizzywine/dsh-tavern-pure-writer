@@ -15,7 +15,7 @@ const { projectPureWritingRequest, projectWritingPreparationRequest, pureWriting
 const { registerModelStreamHooks } = await import(pathToFileURL(resolve(host, 'tavern-plugin/lib/hooks/model-stream.js')))
 const frame = { frameId: 'frame:writing', turn: 3, contributions: [], source: {} }
 const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '去钟楼' }] }
-const context = pureWritingContext('钟楼夜景，采用第三人称。', [player], frame.frameId)
+const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
 const input = { gameId: 'game', frame, context }
 
 function createFixture(readers, runTask) {
@@ -139,9 +139,10 @@ test('白手套沿用前台实际发出的设定、原文历史和本轮输入�
   }, shared)
   assert.match(preparation.system, /用第三人称写钟楼故事/)
   assert.equal(preparation.system, foreground.system)
-  assert.deepEqual(preparation.messages.slice(0, -3), [checkpoint, ...history, player])
-  assert.equal(preparation.messages.at(-3).source.form, 'write')
-  assert.deepEqual(foreground.messages.slice(0, -1), preparation.messages.slice(0, -2))
+  assert.deepEqual(preparation.messages.slice(0, -2), [checkpoint, ...history, player])
+  assert.equal(foreground.messages.at(-2).source.form, 'write')
+  assert.doesNotMatch(JSON.stringify(preparation.messages), /交付本轮完整正文/)
+  assert.deepEqual(foreground.messages.slice(0, -2), preparation.messages.slice(0, -2))
   assert.deepEqual(preparation.messages.slice(-2), [task, result])
   assert.equal(foreground.messages.at(-1).content[0].text, result.content[0].text)
 })
@@ -173,7 +174,7 @@ test('白手套沿用前台历史，流式输出只留下思考、工具调用�
   }
   const context = pureWritingContext('钟楼设定。', [
     { id: 'old', role: 'assistant', content: [{ type: 'text', text: '她走到钟楼。' }] }, player
-  ], frame.frameId)
+  ])
   registerModelStreamHooks({
     ctx, requestCoordinates: new Map(), str: value => String(value ?? ''),
     chatHeaderForSession: async () => undefined, sessionStore: new Map(), agentRegistry: new Map(),
@@ -195,7 +196,7 @@ test('两边的实际写作请求过滤宿主提醒及其内容，保留相邻�
   const body = { role: 'assistant', content: [{ type: 'text', text: '她走到钟楼。' }] }
   const context = pureWritingContext('前台写作设定。' + reminder, [
     typed('runtime-context', reminder), body, player, typed('skill-catalog', 'A skill is a reusable set')
-  ], frame.frameId)
+  ])
   const task = typed('plugin:prepare', '查世界书。')
   const preparation = projectWritingPreparationRequest({ system: reminder, messages: [
     typed('runtime-context', reminder), typed('skill-invocation', 'skill instructions'), task
