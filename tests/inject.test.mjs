@@ -18,7 +18,7 @@ const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: 
 const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
 const input = { gameId: 'game', frame, context }
 
-function createFixture(readers, runTask, requestContext = context) {
+function createFixture(readers, runTask, requestContext = context, requestFrame = frame) {
   const execution = createPluginTaskExecution({
     runTask,
     requireGame: async sessionId => ({ sessionId }),
@@ -32,8 +32,29 @@ function createFixture(readers, runTask, requestContext = context) {
     runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
   apply({ tavern: { capabilities: { writingPreparation: 5 }, writingPreparation: value => preparation.register('pure-writer', value) } })
-  return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext })
+  return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext, frame: requestFrame })
 }
+
+test('世界书标题提示接在白手套共享历史后，前台只收到查询原文', async () => {
+  const hints = '<lorebook_title_hints>\n可能用到的世界书条目：钟楼、城墙\n</lorebook_title_hints>'
+  const hintFrame = { ...frame, context: { worldbookTitleHints: hints } }
+  const taskNote = { id: 'task-note', role: 'user', source: { kind: 'plugin:dsh-tavern', form: 'writing-preparation-task' } }
+  const prepare = createFixture({ worldbook: () => [{ title: '钟楼', text: '塔钟在整点响。' }] }, async task => {
+    const request = projectWritingPreparationRequest({ messages: [taskNote] }, task.writingPreparation)
+    assert.equal(request.system, context.system)
+    assert.deepEqual(request.messages.slice(0, -2), context.messages)
+    assert.equal(request.messages.at(-2).source.form, 'worldbook-title-hints')
+    assert.equal(request.messages.at(-2).content[0].text, hints)
+    assert.deepEqual(request.messages.at(-1), taskNote)
+    await task.call('find_worldbook', { query: '钟楼' })
+  }, context, hintFrame)
+  const material = await prepare()
+  const injection = pureWritingInjection(hintFrame, material)
+  const foreground = projectPureWritingRequest({ tools: [] }, { context, injection })
+  assert.equal(injection.content[0].text, '【世界书 · 钟楼】\n塔钟在整点响。')
+  assert.deepEqual(foreground.messages, [...context.messages, injection])
+  assert.doesNotMatch(JSON.stringify(foreground), /lorebook_title_hints|城墙/)
+})
 
 test('已有世界书原文按回合和同轮去重，内容有变化时保留实际回执', async () => {
   const original = '【世界书 · 钟楼】\n塔钟在整点响。'
