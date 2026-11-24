@@ -175,9 +175,18 @@ index 3ae0ecd9d..d0c82da98 100644
        const selected = { ...configured, ...await providers.controlRoute?.(gameId) }
        if (!selected.mode?.startsWith('plugin-')) return null
 diff --git a/tavern-plugin/lib/domain/plugin-task-execution.js b/tavern-plugin/lib/domain/plugin-task-execution.js
-index 3e45bef52..0efafcfa1 100644
+index 3e45bef52..d7c2f628d 100644
 --- a/tavern-plugin/lib/domain/plugin-task-execution.js
 +++ b/tavern-plugin/lib/domain/plugin-task-execution.js
+@@ -4,7 +4,7 @@ import { pluginMember, pluginMemberId, pluginMemberPrefix } from './background-m
+ import { assertToolParameterKeys } from './tool-schema-keys.js'
+
+ const TOOL_NAME = /^[a-z][a-z0-9_]{2,47}$/
+-const MAX_TOOL_RESULT = 20000
++export const MAX_TOOL_RESULT = 20000
+ const MAX_TASK_PROMPT = 100000
+ const MAX_TASK_TOOLS = 8
+ const MAX_TOOL_CALLS_PER_TASK = 16
 @@ -63,7 +63,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
      return byName
    }
@@ -197,11 +206,10 @@ index 3e45bef52..0efafcfa1 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..9b65f9f95
+index 000000000..d14e9a64b
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,62 @@
-+import { frameUserInput } from './agent-input-frame.js'
+@@ -0,0 +1,61 @@
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
 +import { STORY_SUBMIT_TOOL_NAME } from './story-tool-submission.js'
@@ -377,21 +385,20 @@ index 000000000..396c9e79e
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..76c720a69
+index 000000000..16ab48773
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,102 @@
 +import { untilAborted } from './plugin-callback.js'
++import { MAX_TOOL_RESULT } from './plugin-task-execution.js'
 +
 +const SOURCE_LIMITS = {
-+  skill: { read: 6000, inject: 1000, count: 2, label: '写作 Skill' },
-+  worldbook: { read: 2800, inject: 750, count: 4, label: '世界书' },
-+  memory: { read: 1600, inject: 650, count: 3, label: '剧情记忆' },
-+  variables: { read: 5000, inject: 650, count: 2, label: '当前变量' }
++  skill: { read: 6000, label: '写作 Skill' },
++  worldbook: { read: 2800, label: '世界书' },
++  memory: { read: 1600, label: '剧情记忆' },
++  variables: { read: 5000, label: '当前变量' }
 +}
 +
-+const TOTAL_LIMIT = 4000
-+const ITEM_LIMIT = 8
 +const TIMEOUT_MS = 120000
 +
 +export function createWritingPreparation({ allowed, runAgent, readSources }) {
@@ -422,46 +429,37 @@ index 000000000..76c720a69
 +  async function prepare(entry, { gameId, frame, chat, messages, signal }) {
 +    const done = new AbortController()
 +    const requestSignal = AbortSignal.any([done.signal, entry.lifetime.signal, AbortSignal.timeout(TIMEOUT_MS), ...(signal ? [signal] : [])])
-+    const sources = new Map()
++    const reads = []
 +    let submitted
 +    const sourceReaders = readSources({ gameId, frame, chat, messages, signal: requestSignal })
 +
-+    async function read(kind, args) {
++    function read(kind, args) {
 +      requestSignal.throwIfAborted()
-+      const rows = await sourceReaders[kind](args ?? {})
-+      requestSignal.throwIfAborted()
-+      return rows.slice(0, 8).flatMap(row => {
-+        const text = String(row.text ?? '').trim().slice(0, SOURCE_LIMITS[kind].read)
-+        if (!text) return []
-+        const id = kind + ':' + String(row.id)
-+        const material = { id, title: String(row.title ?? '').slice(0, 120), text }
-+        sources.set(id, { kind, ...material })
-+        return [material]
++      if (submitted) throw new Error('本轮已提交 inject')
++      const limits = SOURCE_LIMITS[kind]
++      const result = Promise.resolve().then(async () => {
++        requestSignal.throwIfAborted()
++        const rows = await sourceReaders[kind](args ?? {})
++        requestSignal.throwIfAborted()
++        return rows.slice(0, 8).flatMap(row => {
++          const text = String(row.text ?? '').trim().slice(0, limits.read)
++          const title = String(row.title ?? '').slice(0, 120)
++          return text ? ['【' + limits.label + (title ? ' · ' + title : '') + '】\n' + text] : []
++        }).join('\n\n').slice(0, MAX_TOOL_RESULT)
 +      })
++      // Keep invocation order even if tools run in parallel. DSH also records
++      // each call, its arguments and its result in the preparation session.
++      reads.push(result)
++      return result.then(text => text || '没有查到资料。')
 +    }
 +
-+    function inject({ items } = {}) {
++    function inject(args = {}) {
 +      requestSignal.throwIfAborted()
-+      if (submitted !== undefined) throw new Error('本轮已提交 inject')
-+      if (!Array.isArray(items) || items.length > ITEM_LIMIT) throw new Error('inject 至多提交 ' + ITEM_LIMIT + ' 个资料片段')
-+      const counts = new Map()
-+      const used = new Set()
-+      const selection = items.map(item => {
-+        const source = sources.get(item?.id)
-+        const excerpt = typeof item?.excerpt === 'string' ? item.excerpt.trim() : ''
-+        if (!source || !excerpt || !source.text.includes(excerpt)) throw new Error('inject 只能提交本轮已读取资料中的原文片段')
-+        const limits = SOURCE_LIMITS[source.kind]
-+        const count = (counts.get(source.kind) ?? 0) + 1
-+        if (count > limits.count || excerpt.length > limits.inject) throw new Error(limits.label + '超过条数或单条长度限制')
-+        if (used.has(source.id) || used.has(excerpt)) throw new Error('inject 不能重复提交同一资料或片段')
-+        counts.set(source.kind, count)
-+        used.add(source.id)
-+        used.add(excerpt)
-+        return '【' + limits.label + (source.title ? ' · ' + source.title : '') + '】\n' + excerpt
-+      }).join('\n\n')
-+      if (selection.length > TOTAL_LIMIT) throw new Error('inject 上下文超过 ' + TOTAL_LIMIT + ' 字')
-+      submitted = selection
-+      return { accepted: true, count: items.length }
++      if (submitted) throw new Error('本轮已提交 inject')
++      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('inject 不接收参数')
++      submitted = untilAborted(Promise.allSettled(reads), requestSignal).then(results =>
++        results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : []).join('\n\n'))
++      return submitted.then(() => ({ accepted: true }))
 +    }
 +
 +    try {
@@ -484,8 +482,8 @@ index 000000000..76c720a69
 +        }
 +      })), requestSignal)
 +      requestSignal.throwIfAborted()
-+      if (submitted === undefined) throw new Error('前置 Agent 没有调用 inject 提交正文上下文')
-+      return submitted
++      if (!submitted) throw new Error('前置 Agent 没有调用 inject 提交正文上下文')
++      return await submitted
 +    } finally {
 +      done.abort()
 +    }
@@ -568,19 +566,19 @@ index 422058325..9751c658e 100644
      const nativeWorldbook = needWorldbook && chat.worldbookStrategy === 'native-skills'
      const needPlugins = Boolean(pluginPromptSections && chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(mode))
 diff --git a/tavern-plugin/lib/index.js b/tavern-plugin/lib/index.js
-index 6115c1238..830ddb9b6 100644
+index a607f42ee..3bc0a925b 100644
 --- a/tavern-plugin/lib/index.js
 +++ b/tavern-plugin/lib/index.js
-@@ -39,7 +39,7 @@ import { registerRequestHooks } from './hooks/request.js'
+@@ -41,7 +41,7 @@ import { registerRequestHooks } from './hooks/request.js'
  import { createWholeReadGuard, scopeTurnHooks } from './domain/whole-read-guard.js'
  import { createChatReads } from './domain/chat-reads.js'
  import { diffJson } from './domain/json-mutation.js'
--import { runningUserPlugins, loaderOrigin, reconcileUserPluginsAtStartup, loaderReload, readPatchedUserPlugins, syncUserPlugins, watchUserPlugins, userPluginPaths } from './domain/user-plugins.js'
-+import { DISABLED_FILE, runningUserPlugins, loaderOrigin, reconcileUserPluginsAtStartup, loaderReload, readPatchedUserPlugins, syncUserPlugins, watchUserPlugins, userPluginPaths } from './domain/user-plugins.js'
+-import { runningUserPlugins, loaderOrigin, reconcileUserPluginsAtStartup, reloadUpdatedCardPlugins, loaderReload, readPatchedUserPlugins, syncUserPlugins, watchUserPlugins, userPluginPaths } from './domain/user-plugins.js'
++import { DISABLED_FILE, runningUserPlugins, loaderOrigin, reconcileUserPluginsAtStartup, reloadUpdatedCardPlugins, loaderReload, readPatchedUserPlugins, syncUserPlugins, watchUserPlugins, userPluginPaths } from './domain/user-plugins.js'
  import { createUserPluginInstaller } from './domain/user-plugin-install.js'
  import { createPluginDataStore } from './domain/plugin-data-store.js'
  import { createPluginAssets } from './domain/plugin-assets.js'
-@@ -174,6 +174,7 @@ import { createPluginData } from './domain/plugin-data.js'
+@@ -176,6 +176,7 @@ import { createPluginData } from './domain/plugin-data.js'
  import { createPluginTurnReader, RECENT_FLOORS } from './domain/plugin-turns.js'
  import { createPluginVariableWriter } from './domain/plugin-variables.js'
  import { createTavernPluginApi } from './plugin-api.js'
@@ -588,7 +586,7 @@ index 6115c1238..830ddb9b6 100644
  import { createSceneWorldbooks } from './domain/scene-worldbook.js'
  import { createSessionStablePrefixStorage, ensureSessionStablePrefix, readSessionStablePrefix } from './domain/session-stable-prefix.js'
  import { waitForWritableSession } from './domain/agent-readiness.js'
-@@ -3321,7 +3322,7 @@ export async function apply(ctx) {
+@@ -3375,7 +3376,7 @@ export async function apply(ctx) {
    // A plugin's one-off task: a fresh background Session, never the resident one settlement uses.
    // A member with a prefix of its own (`system`): that prefix, and the prompt as the task's one
    // message; the plugin hands it whatever story it needs.
@@ -597,7 +595,7 @@ index 6115c1238..830ddb9b6 100644
      const selection = customSelection || backgroundModelSelection(await backgroundConfigForSession(gameId))
      if (!selection) throw new Error('这局没有可用的后台模型')
      const chat = await storyContext({ sessionId: gameId })
-@@ -3332,6 +3333,7 @@ export async function apply(ctx) {
+@@ -3386,6 +3387,7 @@ export async function apply(ctx) {
      return await backgroundAgentRunner.run({
        task: 'plugin',
        pluginName: id ? owner + '/' + id : owner,
@@ -605,7 +603,7 @@ index 6115c1238..830ddb9b6 100644
        member,
        persistent: Boolean(member),
        sessionId: gameId,
-@@ -3362,6 +3364,13 @@ export async function apply(ctx) {
+@@ -3416,6 +3418,13 @@ export async function apply(ctx) {
    const figurePictures = createFigurePictures(() => ctx.get('assetLibrary'))
    pluginApi = createTavernPluginApi({
      ctx,get modHost() {return ctx.get('tavernManagedModules')},
@@ -619,7 +617,7 @@ index 6115c1238..830ddb9b6 100644
      replyStreamRewriters,
      logger: console,
      // The asset packs a card plays with: its own and the ones every card uses.
-@@ -3619,6 +3628,7 @@ export async function apply(ctx) {
+@@ -3673,6 +3682,7 @@ export async function apply(ctx) {
    })
    const pluginBodyGeneration = createPluginBodyGeneration({ chatForSession, routeChatForSession: sessionId => chatHeaderForSession(sessionId, ['mode', 'foregroundFrames', 'timeline']), readRevision: readChatRevision,
      updateChat, settings: readTavernSettings, providers: pluginApi.bodyGenerators,
@@ -627,7 +625,7 @@ index 6115c1238..830ddb9b6 100644
      isWorldbookPath: filePath => worldbookSkillProvider.ownsPath(filePath),
      isBackground: sessionId => backgroundAgentRunner.owns(sessionId),
      regenerateWithProvider: input => regenerateWithProvider(input) })
-@@ -4454,7 +4464,7 @@ export async function apply(ctx) {
+@@ -4509,7 +4519,7 @@ export async function apply(ctx) {
      prepareRegenerationFrameCache: async ({ chat, card, turn, userText, target, targetAssistantIndex }) => {
        if (!chat || !card || !['story', 'script'].includes(chat.mode || 'story')) return null
        const settings = await readTavernSettings()
@@ -636,7 +634,7 @@ index 6115c1238..830ddb9b6 100644
        const preset = await resolveChatRuntimePreset({ ...chat }, { preview: true })
        const worldBook = await playWorldBook(chat, card)
        const targetRow = targetAssistantIndex >= 0 ? chat.messages?.[targetAssistantIndex] : null
-@@ -5014,6 +5024,7 @@ export async function apply(ctx) {
+@@ -5071,6 +5081,7 @@ export async function apply(ctx) {
    const controlledToolNames = new Set([...modTools.map(tool => tool.name), 'style_reference_submit', STORY_SUBMIT_TOOL_NAME, STORY_CONTEXT_TOOL_NAME, STORY_GENERATE_TOOL_NAME, 'tavern_read_variables', ...WORLDBOOK_ACCESS_TOOLS, ...CARD_MEMORY_TOOLS, 'bash', 'pwsh', ...dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'tavern_read_skill', 'web_search', 'web_fetch', 'tavern_save_skill', ...cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_user_profile_confirm', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_search_card', 'tavern_replace_card_text', 'tavern_mvu_overview', 'tavern_apply_mvu', 'tavern_read_play_chat', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search', WORKBENCH_READ_LOREBOOK_TOOL, WORKBENCH_UPDATE_LOREBOOK_TOOL, 'tavern_read_preset', 'tavern_update_preset', 'tavern_read_regex_library', 'tavern_copy_card', 'tavern_set_card_cover', 'tavern_export_card_png', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card', 'tavern_test_response'])
    const foregroundStrategies = createForegroundOrchestrationStrategies({
      nativePlay: {
@@ -644,7 +642,7 @@ index 6115c1238..830ddb9b6 100644
        // Input side: replay past bodies as calls of the submission tool.
        styleReferencePrompt: chat => foregroundStyleReferencePrompt(chat, runtimePrompt('style-reference-recall'), runtimePrompt('style-reference')),
        foregroundCandidatePrompt: async chat => chat?.backgroundTasks?.foregroundCandidates === true
-@@ -5152,6 +5163,7 @@ export async function apply(ctx) {
+@@ -5209,6 +5220,7 @@ export async function apply(ctx) {
      runtimePrompt,
      sessionStore,
      storyOutputToolCall: async () => (await readTavernSettings()).storyOutputToolCall,
@@ -652,7 +650,7 @@ index 6115c1238..830ddb9b6 100644
      turnOrchestrator,
      userMessageForTurn,
    })
-@@ -5165,7 +5177,8 @@ export async function apply(ctx) {
+@@ -5222,7 +5234,8 @@ export async function apply(ctx) {
        pluginGeneration: async sessionId => (await pluginBodyGeneration.route(sessionId)).mode?.startsWith('plugin-'),
        // Input-only requests still declare the tool for their replayed history;
        // accepting a real submission there is harmless.
@@ -663,7 +661,7 @@ index 6115c1238..830ddb9b6 100644
          return settings.storyInputToolCall === true || settings.storyOutputToolCall === true
        },
 diff --git a/tavern-plugin/lib/plugin-api.js b/tavern-plugin/lib/plugin-api.js
-index 14bdb2987..ad2b0f7c5 100644
+index 14bdb2987..25c48eab1 100644
 --- a/tavern-plugin/lib/plugin-api.js
 +++ b/tavern-plugin/lib/plugin-api.js
 @@ -15,6 +15,7 @@ import path from 'node:path'
@@ -678,7 +676,7 @@ index 14bdb2987..ad2b0f7c5 100644
      return name
    }
    const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, guideSource: 1,
-+    ...(deps.writingSources ? { writingPreparation: 1 } : {}),
++    ...(deps.writingSources ? { writingPreparation: 2 } : {}),
      ...(deps.readTavernSettings && deps.updateTavernSettings ? { bodyGenerationDefaults: 1 } : {}),
      ...(deps.generationPresets ? { generationPresets: 1 } : {}),
      ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
