@@ -85,7 +85,7 @@ test('同一白手套的前轮工具轨迹不重复进入本轮查询', () => {
   assert.deepEqual(projected.messages, [...context.messages, currentTask, currentReceipt])
 })
 
-test('自动交接按调用顺序保留完整回执和重复结果', async () => {
+test('Skill 和参考原文只返回给白手套，其他回执按调用顺序自动交接', async () => {
   const skill = Promise.withResolvers()
   const fragment = '第二段也会交给前台。'.repeat(120)
   const readers = {
@@ -126,10 +126,12 @@ test('自动交接按调用顺序保留完整回执和重复结果', async () =>
   })
   const material = await prepare()
   assert.ok(outputs[0].endsWith(fragment))
-  assert.equal(material, outputs.join('\n\n'))
-  assert.match(material, /从林婉的视角描写。/)
-  assert.match(material, /钟楼藏在北岸。钥匙留在桌上。/)
-  assert.doesNotMatch(material, /launch\.sh|npm install|\/tmp\/|references\/|[{}]|story\.py|读取失败|config\/|My Documents|宿主提醒|" "/)
+  assert.equal(material, outputs.slice(2).join('\n\n'))
+  assert.match(outputs[0], /从林婉的视角描写。/)
+  assert.match(outputs[0], /钟楼藏在北岸。钥匙留在桌上。/)
+  assert.match(outputs[1], /参考文件全文。/)
+  assert.doesNotMatch(outputs.join('\n'), /launch\.sh|npm install|\/tmp\/|references\/|[{}]|story\.py|读取失败|config\/|My Documents|宿主提醒|" "/)
+  assert.doesNotMatch(material, /写作指引|参考文件全文|钟楼藏在北岸/)
 
   const request = projectPureWritingRequest({
     system: '旧 Skill 目录', messages: [], toolChoice: 'any',
@@ -139,6 +141,20 @@ test('自动交接按调用顺序保留完整回执和重复结果', async () =>
   assert.equal(request.toolChoice, undefined)
   assert.equal(request.system, context.system)
   assert.deepEqual(request.messages, [player, pureWritingInjection(frame, material)])
+})
+
+test('旧的混合注入按原位置保留非 Skill 回执，纯 Skill 注入退出上下文', () => {
+  const skill = '【写作指引】\n只用于查询的规则。'
+  const reference = '【写作 Skill · 参考】\n旧版参考内容。'
+  const book = '【世界书 · 钟楼】\n第一段。\n\n第二段。'
+  const memory = '【剧情记忆 · 第 1 轮】\n她曾敲钟。'
+  const previous = pureWritingInjection(frame, [skill, book, reference, memory].join('\n\n'))
+  const skillOnly = pureWritingInjection({ ...frame, frameId: 'only-skill' }, skill)
+  const shared = pureWritingContext(context.system, [previous, skillOnly, player])
+  const expected = { ...previous, content: [{ type: 'text', text: book + '\n\n' + memory }] }
+  assert.deepEqual(shared.messages, [expected, player])
+  assert.deepEqual(projectPureWritingRequest({ tools: [] }, { context: shared }).messages, [expected, player])
+  assert.ok(previous.content[0].text.startsWith(skill))
 })
 
 test('白手套沿用前台的设定与原文历史，前轮的注入随原位置保存且重试不重复写入', async () => {
