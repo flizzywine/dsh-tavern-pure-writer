@@ -1,7 +1,7 @@
 {
   "name": "dsh-tavern-pure-writer",
-  "version": "0.2.0",
-  "description": "纯净写作：前置 Agent 按需查询资料，通过 inject() 将查询结果交给前台正文生成。",
+  "version": "0.2.1",
+  "description": "白手套 Agent 调用工具，通过 inject() 将工具结果原样交给前台 Agent。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

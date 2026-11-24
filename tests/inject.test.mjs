@@ -8,17 +8,25 @@ const host = process.env.TAVERN_HOST_ROOT
 assert.ok(host, '指向已应用 compat/tavern-host.patch 的 Tavern 源码目录：TAVERN_HOST_ROOT')
 const domain = module => import(pathToFileURL(resolve(host, 'tavern-plugin/lib/domain', module)))
 const { createWritingPreparation } = await domain('writing-preparation.js')
+const { createPluginTaskExecution } = await domain('plugin-task-execution.js')
 const { projectPureWritingRequest } = await domain('pure-writing-request.js')
 const frame = { frameId: 'frame:writing', turn: 3, contributions: [], source: {} }
 const input = { gameId: 'game', frame }
 
-function createFixture(readers, runAgent) {
+function createFixture(readers, runTask) {
+  const execution = createPluginTaskExecution({
+    runTask,
+    requireGame: async sessionId => ({ sessionId }),
+    choicesFor: async () => ({ disabled: new Set() }),
+    reservedToolNames: new Set(),
+    recordError: () => {}
+  })
   const preparation = createWritingPreparation({
     allowed: async () => true,
     readSources: () => ({ input: () => ({ input: '去钟楼', recent: [] }), listSkills: () => [{ name: 'short' }], ...readers }),
-    runAgent
+    runAgent: (owner, task, onToolResult) => execution.runAgent(owner, task, { writingPreparation: true, onToolResult })
   })
-  apply({ tavern: { capabilities: { writingPreparation: 2 }, writingPreparation: value => preparation.register('pure-writer', value) } })
+  apply({ tavern: { capabilities: { writingPreparation: 3 }, writingPreparation: value => preparation.register('pure-writer', value) } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), input)
 }
 
@@ -35,11 +43,12 @@ test('inject 按调用顺序交付原样回执，保留完整段落与重复结�
     variables: () => Array.from({ length: 6 }, (_, i) => ({ title: `变量 ${i}`, text: i + '甲'.repeat(4999) }))
   }
   let outputs
-  const prepare = createFixture(readers, async (_owner, task) => {
-    const tools = Object.fromEntries(task.tools.map(tool => [tool.name, tool.execute]))
+  const prepare = createFixture(readers, async task => {
+    assert.match(task.system, /你是白手套 Agent/)
+    const tools = Object.fromEntries(task.tools.map(tool => [tool.name, args => task.call(tool.name, args)]))
     const schema = task.tools.find(tool => tool.name === 'inject').parameters
     assert.deepEqual(schema, { type: 'object', properties: {}, required: [], additionalProperties: false })
-    await assert.rejects(tools.inject({ items: [] }), /不接收参数/)
+    assert.match(await tools.inject({ items: [] }), /不接收参数/)
     const base = tools.load_writing_skill({ name: 'short' })
     const reference = await tools.load_writing_skill({ name: 'short', reference: 'references/tower.md' })
     const book = await tools.find_worldbook({ query: '钟楼' })
@@ -47,16 +56,17 @@ test('inject 按调用顺序交付原样回执，保留完整段落与重复结�
     const duplicate = await tools.recall_memory({ query: '钥匙' })
     const variables = await tools.read_variable_summary({ query: '变量' })
     assert.equal(variables.length, 20000)
-    await assert.rejects(tools.recall_memory({ turn: 999 }), /读取失败/)
+    const error = await tools.recall_memory({ turn: 999 })
+    assert.deepEqual(JSON.parse(error), { ok: false, error: '读取失败' })
     const done = tools.inject({})
     assert.equal(task.stopToolsWhen(), false)
-    assert.throws(() => tools.find_worldbook({ query: '迟到的查询' }), /已提交/)
+    assert.match(await tools.find_worldbook({ query: '迟到的查询' }), /已提交/)
     skill.resolve([{ title: 'short', text: '正文第一段。\n\n' + fragment }])
-    assert.deepEqual(await done, { accepted: true })
+    assert.deepEqual(JSON.parse(await done), { accepted: true })
     assert.equal(task.stopToolsWhen(), true)
     assert.equal(task.acceptWithoutText(), true)
-    await assert.rejects(tools.inject({}), /已提交/)
-    outputs = [await base, reference, book, memory, duplicate, variables]
+    assert.match(await tools.inject({}), /已提交/)
+    outputs = [await base, reference, book, memory, duplicate, variables, error]
   })
   const material = await prepare()
   assert.ok(outputs[0].endsWith(fragment))
@@ -74,13 +84,16 @@ test('inject 按调用顺序交付原样回执，保留完整段落与重复结�
   assert.equal(request.messages[1], user)
 })
 
-test('空交接不携带前一轮资料或空查询回执', async () => {
+test('空查询回执原样传递，无工具调用时直接交接', async () => {
   let titles = [{ title: '上一轮', text: '上一轮资料。' }]
-  const prepare = createFixture({ worldbook: () => titles }, async (_owner, task) => {
-    await task.tools.find(tool => tool.name === 'find_worldbook').execute({ query: '钟楼' })
-    await task.tools.find(tool => tool.name === 'inject').execute({})
+  let queried = true
+  const prepare = createFixture({ worldbook: () => titles }, async task => {
+    if (queried) await task.call('find_worldbook', { query: '钟楼' })
+    await task.call('inject', {})
   })
   assert.match(await prepare(), /上一轮资料/)
   titles = []
+  assert.equal(await prepare(), '没有查到资料。')
+  queried = false
   assert.equal(await prepare(), '')
 })

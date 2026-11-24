@@ -1,12 +1,12 @@
 diff --git a/tavern-plugin/lib/background-agent-sessions.js b/tavern-plugin/lib/background-agent-sessions.js
-index 2b9456082..ee7bd18e1 100644
+index 2b9456082..534fe896a 100644
 --- a/tavern-plugin/lib/background-agent-sessions.js
 +++ b/tavern-plugin/lib/background-agent-sessions.js
 @@ -194,6 +194,7 @@ export function createBackgroundAgentSessions(options, task) {
      if (member) return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-plugin-member-v1', label: '插件成员：' + member.name })
      if (input.task === 'polish') return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-polish', label: '正文精修', agentProvider: input.selection.provider, agentModel: input.selection.model, persona: '只审读正文，通过精修工具逐处提交修改。' })
      if (input.task === 'stage-director') return STAGE_DIRECTOR_DESCRIPTOR
-+    if (input.task === 'plugin' && input.writingPreparation) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '前置 Agent' })
++    if (input.task === 'plugin' && input.writingPreparation) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '白手套 Agent' })
      if (input.task === 'plugin') return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '插件任务' + (input.pluginName ? '：' + String(input.pluginName).slice(0, 60) : '') })
      if (!persistent) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '候选研究' })
      return subagentDescriptor({
@@ -175,28 +175,40 @@ index 3ae0ecd9d..d0c82da98 100644
        const selected = { ...configured, ...await providers.controlRoute?.(gameId) }
        if (!selected.mode?.startsWith('plugin-')) return null
 diff --git a/tavern-plugin/lib/domain/plugin-task-execution.js b/tavern-plugin/lib/domain/plugin-task-execution.js
-index 3e45bef52..d7c2f628d 100644
+index 3e45bef52..f16507c84 100644
 --- a/tavern-plugin/lib/domain/plugin-task-execution.js
 +++ b/tavern-plugin/lib/domain/plugin-task-execution.js
-@@ -4,7 +4,7 @@ import { pluginMember, pluginMemberId, pluginMemberPrefix } from './background-m
- import { assertToolParameterKeys } from './tool-schema-keys.js'
-
- const TOOL_NAME = /^[a-z][a-z0-9_]{2,47}$/
--const MAX_TOOL_RESULT = 20000
-+export const MAX_TOOL_RESULT = 20000
- const MAX_TASK_PROMPT = 100000
- const MAX_TASK_TOOLS = 8
- const MAX_TOOL_CALLS_PER_TASK = 16
 @@ -63,7 +63,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
      return byName
    }
  
 -  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}) {
-+  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}, { writingPreparation = false } = {}) {
++  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}, { writingPreparation = false, onToolResult } = {}) {
      const game = await requireGame(gameId)
      // A member of this plugin only (tavern.member): its resident Session, its queue.
      const memberId = member === undefined ? '' : pluginMemberId(owner, String(member))
-@@ -109,6 +109,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
+@@ -80,7 +80,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
+     const byName = prefix ? prefix.tools : checkTools(tools)
+     const callLimit = Number.isSafeInteger(Number(maxToolCalls)) ? Math.max(1, Math.min(32, Number(maxToolCalls))) : MAX_TOOL_CALLS_PER_TASK
+     let calls = 0
+-    const call = async (name, args) => {
++    const executeTool = async (name, args) => {
+       const tool = byName.get(name)
+       if (!tool) return JSON.stringify({ ok: false, error: '没有这个工具：' + name })
+       if (++calls > callLimit) return JSON.stringify({ ok: false, error: '工具调用次数已达上限，请直接给出结果' })
+@@ -92,6 +92,11 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
+         return JSON.stringify({ ok: false, error: String(error?.message || error).slice(0, 500) })
+       }
+     }
++    const call = (name, args) => {
++      const result = executeTool(name, args)
++      onToolResult?.(name, result)
++      return result
++    }
+     try {
+       const systemPrompt = prefix ? prefix.system : system
+       const modelOverride = selection && typeof selection === 'object' && selection.provider && selection.model
+@@ -109,6 +114,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
          call,
          signal,
          member: memberId,
@@ -385,12 +397,11 @@ index 000000000..396c9e79e
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..16ab48773
+index 000000000..f18e52136
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,97 @@
 +import { untilAborted } from './plugin-callback.js'
-+import { MAX_TOOL_RESULT } from './plugin-task-execution.js'
 +
 +const SOURCE_LIMITS = {
 +  skill: { read: 6000, label: '写作 Skill' },
@@ -406,13 +417,13 @@ index 000000000..16ab48773
 +
 +  function register(owner, { prepare } = {}) {
 +    if (typeof prepare !== 'function') throw new TypeError('writingPreparation 需要 prepare 函数')
-+    if (entries.has(owner)) throw new Error('插件已注册正文前置准备')
++    if (entries.has(owner)) throw new Error('插件已注册白手套 Agent')
 +    const entry = { owner, prepare, lifetime: new AbortController() }
 +    entries.set(owner, entry)
 +    return () => {
 +      if (entries.get(owner) !== entry) return
 +      entries.delete(owner)
-+      entry.lifetime.abort(new Error('正文前置插件已停用'))
++      entry.lifetime.abort(new Error('白手套 Agent 插件已停用'))
 +    }
 +  }
 +
@@ -422,43 +433,36 @@ index 000000000..16ab48773
 +    for (const entry of entries.values()) {
 +      if (await allowed(entry.owner, gameId)) applicable.push(entry)
 +    }
-+    if (applicable.length > 1) throw new Error('本局有多个正文前置插件，请只启用一个')
++    if (applicable.length > 1) throw new Error('本局有多个白手套 Agent 插件，请只启用一个')
 +    return applicable[0] ?? null
 +  }
 +
 +  async function prepare(entry, { gameId, frame, chat, messages, signal }) {
 +    const done = new AbortController()
 +    const requestSignal = AbortSignal.any([done.signal, entry.lifetime.signal, AbortSignal.timeout(TIMEOUT_MS), ...(signal ? [signal] : [])])
-+    const reads = []
++    const toolResults = []
 +    let submitted
 +    const sourceReaders = readSources({ gameId, frame, chat, messages, signal: requestSignal })
 +
-+    function read(kind, args) {
++    async function read(kind, args) {
 +      requestSignal.throwIfAborted()
 +      if (submitted) throw new Error('本轮已提交 inject')
 +      const limits = SOURCE_LIMITS[kind]
-+      const result = Promise.resolve().then(async () => {
-+        requestSignal.throwIfAborted()
-+        const rows = await sourceReaders[kind](args ?? {})
-+        requestSignal.throwIfAborted()
-+        return rows.slice(0, 8).flatMap(row => {
-+          const text = String(row.text ?? '').trim().slice(0, limits.read)
-+          const title = String(row.title ?? '').slice(0, 120)
-+          return text ? ['【' + limits.label + (title ? ' · ' + title : '') + '】\n' + text] : []
-+        }).join('\n\n').slice(0, MAX_TOOL_RESULT)
-+      })
-+      // Keep invocation order even if tools run in parallel. DSH also records
-+      // each call, its arguments and its result in the preparation session.
-+      reads.push(result)
-+      return result.then(text => text || '没有查到资料。')
++      const rows = await sourceReaders[kind](args ?? {})
++      requestSignal.throwIfAborted()
++      const text = rows.slice(0, 8).flatMap(row => {
++        const text = String(row.text ?? '').trim().slice(0, limits.read)
++        const title = String(row.title ?? '').slice(0, 120)
++        return text ? ['【' + limits.label + (title ? ' · ' + title : '') + '】\n' + text] : []
++      }).join('\n\n')
++      return text || '没有查到资料。'
 +    }
 +
 +    function inject(args = {}) {
 +      requestSignal.throwIfAborted()
 +      if (submitted) throw new Error('本轮已提交 inject')
 +      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('inject 不接收参数')
-+      submitted = untilAborted(Promise.allSettled(reads), requestSignal).then(results =>
-+        results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : []).join('\n\n'))
++      submitted = untilAborted(Promise.all(toolResults), requestSignal).then(results => results.join('\n\n'))
 +      return submitted.then(() => ({ accepted: true }))
 +    }
 +
@@ -478,11 +482,14 @@ index 000000000..16ab48773
 +        inject,
 +        runAgent: task => {
 +          requestSignal.throwIfAborted()
-+          return runAgent(entry.owner, { ...task, gameId, signal: requestSignal })
++          return runAgent(entry.owner, { ...task, gameId, signal: requestSignal }, (name, result) => {
++            // Keep call order for concurrent tools and reuse the exact model-facing receipt.
++            if (!submitted && name !== 'inject') toolResults.push(result)
++          })
 +        }
 +      })), requestSignal)
 +      requestSignal.throwIfAborted()
-+      if (!submitted) throw new Error('前置 Agent 没有调用 inject 提交正文上下文')
++      if (!submitted) throw new Error('白手套 Agent 没有调用 inject 提交正文上下文')
 +      return await submitted
 +    } finally {
 +      done.abort()
@@ -661,7 +668,7 @@ index a607f42ee..3bc0a925b 100644
          return settings.storyInputToolCall === true || settings.storyOutputToolCall === true
        },
 diff --git a/tavern-plugin/lib/plugin-api.js b/tavern-plugin/lib/plugin-api.js
-index 14bdb2987..25c48eab1 100644
+index 14bdb2987..6259566fc 100644
 --- a/tavern-plugin/lib/plugin-api.js
 +++ b/tavern-plugin/lib/plugin-api.js
 @@ -15,6 +15,7 @@ import path from 'node:path'
@@ -676,7 +683,7 @@ index 14bdb2987..25c48eab1 100644
      return name
    }
    const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, guideSource: 1,
-+    ...(deps.writingSources ? { writingPreparation: 2 } : {}),
++    ...(deps.writingSources ? { writingPreparation: 3 } : {}),
      ...(deps.readTavernSettings && deps.updateTavernSettings ? { bodyGenerationDefaults: 1 } : {}),
      ...(deps.generationPresets ? { generationPresets: 1 } : {}),
      ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
@@ -693,12 +700,12 @@ index 14bdb2987..25c48eab1 100644
 +      const scope = await accessScope(owner)
 +      return !scope || scope.cards.includes(await deps.cardPathOf?.(gameId))
 +    },
-+    runAgent: (owner, input) => taskExecution.runAgent(owner, input, { writingPreparation: true }),
++    runAgent: (owner, input, onToolResult) => taskExecution.runAgent(owner, input, { writingPreparation: true, onToolResult }),
 +    readSources: deps.writingSources
 +  })
    const service = {
 +    writingPreparation(input) {
-+      if (!capabilities.writingPreparation) throw new Error('当前宿主没有正文前置准备接口')
++      if (!capabilities.writingPreparation) throw new Error('当前宿主没有白手套 Agent 接口')
 +      const owner = ownerOf(this)
 +      return owned(this, () => writingPreparation.register(owner, input), 'tavern.writingPreparation()')
 +    },
