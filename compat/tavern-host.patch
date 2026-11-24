@@ -30,6 +30,84 @@ index 8fb5366e3..e792c715b 100644
          const snapshot = typeof options.resolveRuntimePresetSnapshot === 'function'
            ? await options.resolveRuntimePresetSnapshot({
              sessionId: input.sessionId,
+diff --git a/tavern-plugin/lib/client.js b/tavern-plugin/lib/client.js
+index 8dccea205..d411229dd 100644
+--- a/tavern-plugin/lib/client.js
++++ b/tavern-plugin/lib/client.js
+@@ -44949,6 +44949,12 @@ function tavernStoryNativeTurnOfLocation(location) {
+ 	return Number.isSafeInteger(turn) && turn >= 0 ? turn : null
+ }
+
++function tavernTrajectorySystemReminder(state) {
++	if (state?.kind !== 'context') return false
++	if (['runtime-context', 'skill-catalog', 'skill-invocation'].includes(state.source?.kind)) return true
++	return state.content?.some(block => block?.type === 'text' && /^\s*<system-reminder\b/i.test(block.text)) === true
++}
++
+ function installTavernStoryExternalHistory(options) {
+ 	let conversationModule
+ 	try { conversationModule = options.require('@deepseek-ai/dsh-client-ui-conversation/client') }
+@@ -44959,6 +44965,7 @@ function installTavernStoryExternalHistory(options) {
+ 		const existing = proto.__dshTavernStoryExternalHistory
+ 		existing.uiConversation = options.uiConversation
+ 		existing.isEnabled = options.isEnabled
++		existing.trajectoryPolicy = options.trajectoryPolicy
+ 		return existing.attach()
+ 	}
+
+@@ -44967,6 +44974,7 @@ function installTavernStoryExternalHistory(options) {
+ 	const controller = {
+ 		uiConversation: options.uiConversation,
+ 		isEnabled: options.isEnabled,
++		trajectoryPolicy: options.trajectoryPolicy,
+ 		alive: true,
+ 		owners: 0,
+ 		attach: null,
+@@ -44980,8 +44988,10 @@ function installTavernStoryExternalHistory(options) {
+ 		const originalBuild = assembler.buildNode
+ 		const originalDispose = typeof binding.dispose === 'function' ? binding.dispose : null
+ 		const record = { binding: binding, assembler: assembler, sessionId: sessionId, originalBuild: originalBuild,
+-			originalDispose: originalDispose, lastEnabled: assembler.activeTargets && assembler.activeTargets.has('chat') ? undefined : controller.isEnabled(sessionId) }
++			originalDispose: originalDispose, lastEnabled: assembler.activeTargets && assembler.activeTargets.has('chat') ? undefined : controller.isEnabled(sessionId),
++			hideSystemReminders: false }
+ 		function filteredBuild(context, target) {
++			if (controller.alive && target === 'trajectory' && record.hideSystemReminders && tavernTrajectorySystemReminder(context.state)) return null
+ 			if (controller.alive && target === 'chat' && controller.isEnabled(record.sessionId)
+ 				&& (context.current == null || context.current.get(target) == null)) {
+ 				const turn = tavernStoryNativeTurnOfLocation(context.start && context.start.location)
+@@ -45008,6 +45018,13 @@ function installTavernStoryExternalHistory(options) {
+ 		}
+ 		records.set(assembler, record)
+ 		active.add(record)
++		if (controller.trajectoryPolicy) {
++			Promise.resolve().then(function () { return controller.trajectoryPolicy(record.sessionId) }).then(function (policy) {
++				if (!controller.alive || !active.has(record) || policy?.hideSystemReminders !== true) return
++				record.hideSystemReminders = true
++				if (assembler.activeTargets?.has('trajectory')) binding.rebuild()
++			}).catch(function () {})
++		}
+ 		return record
+ 	}
+
+@@ -45057,7 +45074,7 @@ function installTavernStoryExternalHistory(options) {
+ 		}
+ 		for (const record of active) {
+ 			const assembler = record.assembler
+-			if (assembler.activeTargets && assembler.activeTargets.has('chat')) {
++			if (assembler.activeTargets && (assembler.activeTargets.has('chat') || record.hideSystemReminders && assembler.activeTargets.has('trajectory'))) {
+ 				try { record.binding.rebuild() }
+ 				catch (_) {}
+ 			}
+@@ -46928,6 +46945,9 @@ function createTavernStoryTranscriptFeature(deps) {
+ 			const external = externalHistoryInstaller({
+ 				require: typeof require === 'function' ? require : function () { throw new Error('宿主模块加载器不可用') },
+ 				uiConversation: uiConversation,
++				trajectoryPolicy: function (sessionId) {
++					return rpc('getWritingTrajectoryPolicy', { sessionId: sessionId }, sessionId)
++				},
+ 				isEnabled: function (sessionId) {
+ 					return mode.getSnapshot() && mountedStories.has(String(sessionId))
+ 				}
 diff --git a/tavern-plugin/lib/domain/compaction-checkpoint.js b/tavern-plugin/lib/domain/compaction-checkpoint.js
 index 13631f301..ac8a6c954 100644
 --- a/tavern-plugin/lib/domain/compaction-checkpoint.js
@@ -1012,3 +1090,147 @@ index 14bdb2987..fd907f9b2 100644
      listGalleryProviderItems, readGalleryProviderImage, removeGalleryProviderItems,
      // The asset library's access to the 配图 人物库 records (registerImageLibrary schema 4); outside any card.
      imageCharacters: (op, input) => imageCatalog.record(op, {}, input),
+diff --git a/tavern-plugin/lib/rpc/maintenance.js b/tavern-plugin/lib/rpc/maintenance.js
+index 10566a77f..69a221aa3 100644
+--- a/tavern-plugin/lib/rpc/maintenance.js
++++ b/tavern-plugin/lib/rpc/maintenance.js
+@@ -9,7 +9,7 @@ import path from 'node:path'
+ export function createMaintenanceHandlers(deps) {
+   const { TAVERN_PACKAGE_VERSION, agentRegistry, applicationUpdater, attachPlayChatDebug,
+     backgroundAgentRunner, chatForSession, chatHeaderForSession, compatibilityDiagnostics,
+-    displayRuntimeCaptures, exportTavernLogs, hostCompatibility, modelRequestLog, mvuDiagnostics,
++    displayRuntimeCaptures, exportTavernLogs, hostCompatibility, modelRequestLog, mvuDiagnostics, pluginApi,
+     preparedSaveSessions, readChat, readChatCard, readSessionMap, saveUpgrade, sessionPatch,
+     sessionStateForSession, sessionStore, str, worldbookRecallLog } = deps
+   const handlers = {
+@@ -58,6 +58,13 @@ export function createMaintenanceHandlers(deps) {
+     async cancelUpdate(args) {
+       return { status: await applicationUpdater.cancel() }
+     },
++    async getWritingTrajectoryPolicy(args) {
++      const sessionId = str(args?.sessionId)
++      const chat = sessionId && await chatHeaderForSession(sessionId, ['mode', 'requestMode'])
++      const writing = chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(chat.mode)
++        && await pluginApi.writingPreparation.forGame(sessionId)
++      return { hideSystemReminders: Boolean(writing) }
++    },
+     async getLatestRequestContext(args) {
+       const sessionId = str(args?.sessionId)
+       const background = backgroundAgentRunner.requestContext(sessionId)
+diff --git a/tavern-plugin/src/client/features/story-transcript-list.js b/tavern-plugin/src/client/features/story-transcript-list.js
+index 4555f27f0..4fd23e8bd 100644
+--- a/tavern-plugin/src/client/features/story-transcript-list.js
++++ b/tavern-plugin/src/client/features/story-transcript-list.js
+@@ -1094,6 +1094,9 @@ function createTavernStoryTranscriptFeature(deps) {
+ 			const external = externalHistoryInstaller({
+ 				require: typeof require === 'function' ? require : function () { throw new Error('宿主模块加载器不可用') },
+ 				uiConversation: uiConversation,
++				trajectoryPolicy: function (sessionId) {
++					return rpc('getWritingTrajectoryPolicy', { sessionId: sessionId }, sessionId)
++				},
+ 				isEnabled: function (sessionId) {
+ 					return mode.getSnapshot() && mountedStories.has(String(sessionId))
+ 				}
+diff --git a/tavern-plugin/src/client/modules/story-external-history.js b/tavern-plugin/src/client/modules/story-external-history.js
+index c25ed55ed..c386188be 100644
+--- a/tavern-plugin/src/client/modules/story-external-history.js
++++ b/tavern-plugin/src/client/modules/story-external-history.js
+@@ -8,6 +8,12 @@ function tavernStoryNativeTurnOfLocation(location) {
+ 	return Number.isSafeInteger(turn) && turn >= 0 ? turn : null
+ }
+
++function tavernTrajectorySystemReminder(state) {
++	if (state?.kind !== 'context') return false
++	if (['runtime-context', 'skill-catalog', 'skill-invocation'].includes(state.source?.kind)) return true
++	return state.content?.some(block => block?.type === 'text' && /^\s*<system-reminder\b/i.test(block.text)) === true
++}
++
+ function installTavernStoryExternalHistory(options) {
+ 	let conversationModule
+ 	try { conversationModule = options.require('@deepseek-ai/dsh-client-ui-conversation/client') }
+@@ -18,6 +24,7 @@ function installTavernStoryExternalHistory(options) {
+ 		const existing = proto.__dshTavernStoryExternalHistory
+ 		existing.uiConversation = options.uiConversation
+ 		existing.isEnabled = options.isEnabled
++		existing.trajectoryPolicy = options.trajectoryPolicy
+ 		return existing.attach()
+ 	}
+
+@@ -26,6 +33,7 @@ function installTavernStoryExternalHistory(options) {
+ 	const controller = {
+ 		uiConversation: options.uiConversation,
+ 		isEnabled: options.isEnabled,
++		trajectoryPolicy: options.trajectoryPolicy,
+ 		alive: true,
+ 		owners: 0,
+ 		attach: null,
+@@ -39,8 +47,10 @@ function installTavernStoryExternalHistory(options) {
+ 		const originalBuild = assembler.buildNode
+ 		const originalDispose = typeof binding.dispose === 'function' ? binding.dispose : null
+ 		const record = { binding: binding, assembler: assembler, sessionId: sessionId, originalBuild: originalBuild,
+-			originalDispose: originalDispose, lastEnabled: assembler.activeTargets && assembler.activeTargets.has('chat') ? undefined : controller.isEnabled(sessionId) }
++			originalDispose: originalDispose, lastEnabled: assembler.activeTargets && assembler.activeTargets.has('chat') ? undefined : controller.isEnabled(sessionId),
++			hideSystemReminders: false }
+ 		function filteredBuild(context, target) {
++			if (controller.alive && target === 'trajectory' && record.hideSystemReminders && tavernTrajectorySystemReminder(context.state)) return null
+ 			if (controller.alive && target === 'chat' && controller.isEnabled(record.sessionId)
+ 				&& (context.current == null || context.current.get(target) == null)) {
+ 				const turn = tavernStoryNativeTurnOfLocation(context.start && context.start.location)
+@@ -67,6 +77,13 @@ function installTavernStoryExternalHistory(options) {
+ 		}
+ 		records.set(assembler, record)
+ 		active.add(record)
++		if (controller.trajectoryPolicy) {
++			Promise.resolve().then(function () { return controller.trajectoryPolicy(record.sessionId) }).then(function (policy) {
++				if (!controller.alive || !active.has(record) || policy?.hideSystemReminders !== true) return
++				record.hideSystemReminders = true
++				if (assembler.activeTargets?.has('trajectory')) binding.rebuild()
++			}).catch(function () {})
++		}
+ 		return record
+ 	}
+
+@@ -116,7 +133,7 @@ function installTavernStoryExternalHistory(options) {
+ 		}
+ 		for (const record of active) {
+ 			const assembler = record.assembler
+-			if (assembler.activeTargets && assembler.activeTargets.has('chat')) {
++			if (assembler.activeTargets && (assembler.activeTargets.has('chat') || record.hideSystemReminders && assembler.activeTargets.has('trajectory'))) {
+ 				try { record.binding.rebuild() }
+ 				catch (_) {}
+ 			}
+diff --git a/tests/story-external-history.test.mjs b/tests/story-external-history.test.mjs
+index d98408ffb..c82e09c06 100644
+--- a/tests/story-external-history.test.mjs
++++ b/tests/story-external-history.test.mjs
+@@ -59,12 +59,30 @@ function harness(options = {}) {
+ 	const handle = context.installTavernStoryExternalHistory({
+ 		require: () => ({ UiConversation }),
+ 		uiConversation: instance,
++		trajectoryPolicy: options.trajectoryPolicy,
+ 		isEnabled: session => { enabledCalls.push(session); return state.enabled }
+ 	})
+ 	return { context, handle, instance, proto, originalProtoBinding, assembler, binding, originalBuild, originalDispose,
+ 		calls, rebuilds, rebuiltNodes, disposed, enabledCalls, state }
+ }
+
++test('纯净写作的前台轨迹隐藏宿主提醒并保留玩家内容', async () => {
++	const h = harness({ activeTargets: new Set(['trajectory']), trajectoryPolicy: async id => ({ hideSystemReminders: id === 's1' }) })
++	h.instance.binding('s1')
++	await new Promise(resolve => setImmediate(resolve))
++	assert.equal(h.rebuilds.length, 1)
++	const reminder = at(3, { state: { kind: 'context', source: { kind: 'runtime-context' } } })
++	assert.equal(h.assembler.buildNode(reminder, 'trajectory'), null)
++	const skill = at(3, { state: { kind: 'context', source: { kind: 'skill-catalog' } } })
++	assert.equal(h.assembler.buildNode(skill, 'trajectory'), null)
++	const player = at(3, { state: { kind: 'user', content: [{ type: 'text', text: '<system-reminder>书里的字样' }] } })
++	assert.equal(h.assembler.buildNode(player, 'trajectory').native, true)
++	assert.equal(h.assembler.buildNode(at(3, { state: { kind: 'assistant' } }), 'trajectory').native, true)
++	assert.equal(h.assembler.buildNode(reminder, 'preview').native, true)
++	h.handle.dispose()
++	assert.equal(h.assembler.buildNode(reminder, 'trajectory').native, true)
++})
++
+ test('故事模式下未物化的旧回合不构建 chat 节点，返回 null 且不调用原生 buildNode', () => {
+ 	const h = harness()
+ 	assert.equal(h.instance.binding('s1'), h.binding)
