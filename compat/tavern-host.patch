@@ -45,7 +45,7 @@ index 8fb5366e3..e792c715b 100644
            ? await options.resolveRuntimePresetSnapshot({
              sessionId: input.sessionId,
 diff --git a/tavern-plugin/lib/client.js b/tavern-plugin/lib/client.js
-index 8dccea205..3c827b1e8 100644
+index 8dccea205..87f0bbe4b 100644
 --- a/tavern-plugin/lib/client.js
 +++ b/tavern-plugin/lib/client.js
 @@ -44943,6 +44943,32 @@ function createTavernStoryTranscriptDataModule(deps) {
@@ -143,7 +143,46 @@ index 8dccea205..3c827b1e8 100644
  				isEnabled: function (sessionId) {
  					return mode.getSnapshot() && mountedStories.has(String(sessionId))
  				}
-@@ -67627,7 +67668,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+@@ -67532,6 +67573,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+         }
+         const CONTEXT_SOURCE_CATEGORIES = {
+             worldbook: "世界书",
++            skill: "写作 Skill",
+             preset: "预设",
+             card: "人物卡",
+             story: "正文",
+@@ -67540,6 +67582,22 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+             tool: "工具",
+             system: "系统"
+         };
++        function isWhiteGloveMessage(message, form) {
++            return message?.source?.kind === "plugin:dsh-tavern-pure-writer" && message.source.form === form;
++        }
++        function describeWhiteGloveMaterials(parts) {
++            const text = parts.map(part => part.text).join("\n");
++            // The handoff is a single text block. Its receipt headings identify the
++            // material for filters without changing the block or its cache position.
++            const sources = [
++                { heading: "世界书", category: "worldbook", label: "世界书" },
++                { heading: "写作指引", category: "skill", label: "写作 Skill" },
++                { heading: "剧情记忆", category: "story", label: "剧情记忆" },
++                { heading: "当前变量", category: "state", label: "当前变量" }
++            ];
++            return sources.filter(({ heading }) => new RegExp("^【" + heading + "(?: · [^】\\r\\n]+)?】$", "m").test(text))
++                .map(({ category, label }) => ({ category, label }));
++        }
+         function describeSectionSource(name, rest) {
+             if (!name) return { category: "plugin", label: "附加上下文" };
+             if (name === "tavern:runtime-preset-front") return { category: "preset", label: "前段预设" };
+@@ -67574,6 +67632,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+             const source = message && message.source;
+             const kind = typeof source?.kind === "string" ? source.kind : "";
+             const form = typeof source?.form === "string" ? source.form : "";
++            if (isWhiteGloveMessage(message, "inject")) return { category: "plugin", label: "白手套注入" };
+             if (form === "worldbook-snapshot") return { category: "worldbook", label: "世界书快照" };
+             if (form === "worldbook-recovery") return { category: "worldbook", label: "世界书恢复" };
+             if (form === "writing-rules") return { category: "plugin", label: "写作规则" };
+@@ -67627,7 +67686,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
              if (!request) return [];
              const sections = [];
              // System and tool declarations are independent request fields, not trailing messages.
@@ -152,25 +191,34 @@ index 8dccea205..3c827b1e8 100644
              if (Object.keys(metadata).length) sections.push({ title: "调用参数", value: metadata, cacheKey: "field:metadata", sources: [{ category: "system", label: "调用参数" }] });
              function addField(key) {
                  if (!Object.hasOwn(request, key)) return;
-@@ -67831,7 +67872,13 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+@@ -67686,6 +67745,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+                     }
+                 }
+                 const messageSources = collectSectionSources(displayParts, fallbackSource);
++                if (isWhiteGloveMessage(message, "inject")) messageSources.push(...describeWhiteGloveMaterials(displayParts));
+                 sections.push({ title: "messages[" + index + "] · " + (message?.role || "消息") + (phases.length ? " · 含" + phases.join("、") : ""), value: message,
+                     cacheKey: "msg:" + index,
+                     fallbackSource,
+@@ -67831,7 +67891,12 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
                          h("span", { className: "dsh-context-diff-sign" }, line.type === "add" ? "+" : line.type === "del" ? "-" : line.type === "omit" ? "⋯" : " "),
                          h("code", null, line.text)))));
          }
 -		function FullRequestContextView(props) {
-+        function describeForegroundRequest(record) {
++        function foregroundRequestMode(record) {
 +            if (record?.scope !== "foreground" || record.task !== "reply" || !record.request) return "";
-+            const pure = record.request.messages?.some(message =>
-+                message.source?.kind === "plugin:dsh-tavern-pure-writer" && message.source.form === "write");
-+            return pure ? "白手套模式 · 前台" : "普通前台";
++            const pure = record.request.messages?.some(message => isWhiteGloveMessage(message, "write") || isWhiteGloveMessage(message, "inject"));
++            return pure ? "white-glove" : "standard";
 +        }
 +        function FullRequestContextView(props) {
  			const h = React.createElement;
              const [record, setRecord] = React.useState(null);
              const [error, setError] = React.useState("");
-@@ -67842,6 +67889,11 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+@@ -67842,6 +67907,13 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
              const loaded = React.useRef(null);
              const listRef = React.useRef(null);
              const [loading, setLoading] = React.useState(true);
++            // Contexts reach 100k+ characters; filter off the typing path.
++            const deferredQuery = React.useDeferredValue(query.toLowerCase());
 +            React.useEffect(() => {
 +                if (!props.contextSessionId || typeof tavernSessionSignals === "undefined") return;
 +                const reload = () => setRefresh(value => value + 1);
@@ -179,24 +227,59 @@ index 8dccea205..3c827b1e8 100644
              React.useEffect(() => {
                  let active = true; setError(""); setLoading(true);
                  if (loaded.current?.sessionId !== props.contextSessionId) { loaded.current = null; setRecord(null); setSourceFilter("all"); }
-@@ -67857,6 +67909,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+@@ -67852,11 +67924,12 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+                 return () => { active = false; };
+             }, [props.contextSessionId, refresh]);
+             React.useEffect(() => {
+-                if (!jumpTarget.key || !listRef.current) return;
++                if (!jumpTarget.key || !listRef.current || deferredQuery || sourceFilter !== "all") return;
+                 const el = listRef.current.querySelector('[data-cache-key="' + jumpTarget.key.replace(/"/g, '\\"') + '"]');
                  if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "center" });
-             }, [jumpTarget]);
+-            }, [jumpTarget]);
++            }, [jumpTarget, deferredQuery, sourceFilter]);
  			const request = record && record.request;
-+            const foregroundLabel = describeForegroundRequest(record);
++            const foregroundMode = foregroundRequestMode(record);
              const cacheDiff = record && record.cacheDiff;
              const sectionStatusMap = (cacheDiff && cacheDiff.sectionStatus) || {};
              const breakPoint = (cacheDiff && cacheDiff.breakPoint) || null;
-@@ -67894,7 +67947,8 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+@@ -67865,6 +67938,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+                 const sourceTags = (section.sources || []).map(src => (CONTEXT_SOURCE_CATEGORIES[src.category] || "") + " " + src.label).join(" ");
+                 return { ...section, tokens: estimateTavernTokens(section.text), searchText: (section.title + " " + sourceTags + " " + section.text).toLowerCase() };
+             }), [request]);
++            const injection = sections.find(section => isWhiteGloveMessage(section.value, "inject"));
+             const sourceCounts = React.useMemo(() => {
+                 const counts = {};
+                 for (const section of sections) {
+@@ -67873,12 +67947,10 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+                 }
+                 return Object.keys(CONTEXT_SOURCE_CATEGORIES).filter(cat => counts[cat] > 0).map(cat => ({ key: cat, label: CONTEXT_SOURCE_CATEGORIES[cat], count: counts[cat] }));
+             }, [sections]);
+-            // Contexts reach 100k+ characters; filter off the typing path.
+-            const deferredQuery = React.useDeferredValue(query.toLowerCase());
+             function downloadJson() {
+                 downloadTavernBlob(new Blob([text], { type: "application/json;charset=utf-8" }), "request-context.json");
+             }
+-            function handleJumpBreak(key) {
++            function jumpToSection(key) {
+                 if (query) setQuery("");
+                 if (sourceFilter !== "all") setSourceFilter("all");
+                 setJumpTarget(prev => ({ key, tick: prev.tick + 1 }));
+@@ -67894,9 +67966,13 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
                      h("button", { disabled: loading, onClick: () => setRefresh(value => value + 1) }, loading ? "读取中…" : "刷新")),
                  record ? h("div", { className: "dsh-context-meta" },
                      h("span", { className: "dsh-context-badge" }, "第 " + record.turn + " 轮 · 步骤 " + record.step),
 -                    h("span", null, request.model || ""),
-+                    foregroundLabel ? h("span", { className: "dsh-context-badge" }, foregroundLabel) : null,
++                    foregroundMode ? h("span", { className: "dsh-context-badge" }, foregroundMode === "white-glove" ? "白手套模式 · 前台" : "普通前台") : null,
++                    injection ? h("button", { type: "button", className: "dsh-context-filter-chip", onClick: () => jumpToSection(injection.cacheKey) }, "查看白手套注入")
++                        : foregroundMode === "white-glove"
++                            ? h("span", null, "本轮无资料注入") : null,
 +                    h("span", null, request?.model || ""),
                      h("time", null, new Date(record.createdAt).toLocaleString())) : null,
-                 renderCacheDiffSummary(h, record, handleJumpBreak),
+-                renderCacheDiffSummary(h, record, handleJumpBreak),
++                renderCacheDiffSummary(h, record, jumpToSection),
                  h("div", { className: "dsh-context-toolbar" },
+                     h("input", { type: "search", "aria-label": "搜索完整上下文", placeholder: "搜索提示词、来源（如世界书/预设/插件）、消息或工具…", value: query, onChange: e => setQuery(e.target.value) }),
+                     request ? h("button", { onClick: async () => { try { await navigator.clipboard.writeText(text); } catch (e) { setError("复制失败：" + String(e.message || e)); } } }, "复制 JSON") : null,
 diff --git a/tavern-plugin/lib/domain/background-descriptors.js b/tavern-plugin/lib/domain/background-descriptors.js
 index 5095d9330..5e0ddb7b6 100644
 --- a/tavern-plugin/lib/domain/background-descriptors.js
@@ -1495,10 +1578,49 @@ index 10566a77f..8786472a5 100644
        const sessionId = str(args?.sessionId)
        const background = backgroundAgentRunner.requestContext(sessionId)
 diff --git a/tavern-plugin/src/client/features/request-context.js b/tavern-plugin/src/client/features/request-context.js
-index 9edda3409..08b96da6b 100644
+index 9edda3409..780e63879 100644
 --- a/tavern-plugin/src/client/features/request-context.js
 +++ b/tavern-plugin/src/client/features/request-context.js
-@@ -122,7 +122,7 @@
+@@ -27,6 +27,7 @@
+         }
+         const CONTEXT_SOURCE_CATEGORIES = {
+             worldbook: "世界书",
++            skill: "写作 Skill",
+             preset: "预设",
+             card: "人物卡",
+             story: "正文",
+@@ -35,6 +36,22 @@
+             tool: "工具",
+             system: "系统"
+         };
++        function isWhiteGloveMessage(message, form) {
++            return message?.source?.kind === "plugin:dsh-tavern-pure-writer" && message.source.form === form;
++        }
++        function describeWhiteGloveMaterials(parts) {
++            const text = parts.map(part => part.text).join("\n");
++            // The handoff is a single text block. Its receipt headings identify the
++            // material for filters without changing the block or its cache position.
++            const sources = [
++                { heading: "世界书", category: "worldbook", label: "世界书" },
++                { heading: "写作指引", category: "skill", label: "写作 Skill" },
++                { heading: "剧情记忆", category: "story", label: "剧情记忆" },
++                { heading: "当前变量", category: "state", label: "当前变量" }
++            ];
++            return sources.filter(({ heading }) => new RegExp("^【" + heading + "(?: · [^】\\r\\n]+)?】$", "m").test(text))
++                .map(({ category, label }) => ({ category, label }));
++        }
+         function describeSectionSource(name, rest) {
+             if (!name) return { category: "plugin", label: "附加上下文" };
+             if (name === "tavern:runtime-preset-front") return { category: "preset", label: "前段预设" };
+@@ -69,6 +86,7 @@
+             const source = message && message.source;
+             const kind = typeof source?.kind === "string" ? source.kind : "";
+             const form = typeof source?.form === "string" ? source.form : "";
++            if (isWhiteGloveMessage(message, "inject")) return { category: "plugin", label: "白手套注入" };
+             if (form === "worldbook-snapshot") return { category: "worldbook", label: "世界书快照" };
+             if (form === "worldbook-recovery") return { category: "worldbook", label: "世界书恢复" };
+             if (form === "writing-rules") return { category: "plugin", label: "写作规则" };
+@@ -122,7 +140,7 @@
              if (!request) return [];
              const sections = [];
              // System and tool declarations are independent request fields, not trailing messages.
@@ -1507,25 +1629,34 @@ index 9edda3409..08b96da6b 100644
              if (Object.keys(metadata).length) sections.push({ title: "调用参数", value: metadata, cacheKey: "field:metadata", sources: [{ category: "system", label: "调用参数" }] });
              function addField(key) {
                  if (!Object.hasOwn(request, key)) return;
-@@ -326,7 +326,13 @@
+@@ -181,6 +199,7 @@
+                     }
+                 }
+                 const messageSources = collectSectionSources(displayParts, fallbackSource);
++                if (isWhiteGloveMessage(message, "inject")) messageSources.push(...describeWhiteGloveMaterials(displayParts));
+                 sections.push({ title: "messages[" + index + "] · " + (message?.role || "消息") + (phases.length ? " · 含" + phases.join("、") : ""), value: message,
+                     cacheKey: "msg:" + index,
+                     fallbackSource,
+@@ -326,7 +345,12 @@
                          h("span", { className: "dsh-context-diff-sign" }, line.type === "add" ? "+" : line.type === "del" ? "-" : line.type === "omit" ? "⋯" : " "),
                          h("code", null, line.text)))));
          }
 -		function FullRequestContextView(props) {
-+        function describeForegroundRequest(record) {
++        function foregroundRequestMode(record) {
 +            if (record?.scope !== "foreground" || record.task !== "reply" || !record.request) return "";
-+            const pure = record.request.messages?.some(message =>
-+                message.source?.kind === "plugin:dsh-tavern-pure-writer" && message.source.form === "write");
-+            return pure ? "白手套模式 · 前台" : "普通前台";
++            const pure = record.request.messages?.some(message => isWhiteGloveMessage(message, "write") || isWhiteGloveMessage(message, "inject"));
++            return pure ? "white-glove" : "standard";
 +        }
 +        function FullRequestContextView(props) {
  			const h = React.createElement;
              const [record, setRecord] = React.useState(null);
              const [error, setError] = React.useState("");
-@@ -337,6 +343,11 @@
+@@ -337,6 +361,13 @@
              const loaded = React.useRef(null);
              const listRef = React.useRef(null);
              const [loading, setLoading] = React.useState(true);
++            // Contexts reach 100k+ characters; filter off the typing path.
++            const deferredQuery = React.useDeferredValue(query.toLowerCase());
 +            React.useEffect(() => {
 +                if (!props.contextSessionId || typeof tavernSessionSignals === "undefined") return;
 +                const reload = () => setRefresh(value => value + 1);
@@ -1534,24 +1665,59 @@ index 9edda3409..08b96da6b 100644
              React.useEffect(() => {
                  let active = true; setError(""); setLoading(true);
                  if (loaded.current?.sessionId !== props.contextSessionId) { loaded.current = null; setRecord(null); setSourceFilter("all"); }
-@@ -352,6 +363,7 @@
+@@ -347,11 +378,12 @@
+                 return () => { active = false; };
+             }, [props.contextSessionId, refresh]);
+             React.useEffect(() => {
+-                if (!jumpTarget.key || !listRef.current) return;
++                if (!jumpTarget.key || !listRef.current || deferredQuery || sourceFilter !== "all") return;
+                 const el = listRef.current.querySelector('[data-cache-key="' + jumpTarget.key.replace(/"/g, '\\"') + '"]');
                  if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "center" });
-             }, [jumpTarget]);
+-            }, [jumpTarget]);
++            }, [jumpTarget, deferredQuery, sourceFilter]);
  			const request = record && record.request;
-+            const foregroundLabel = describeForegroundRequest(record);
++            const foregroundMode = foregroundRequestMode(record);
              const cacheDiff = record && record.cacheDiff;
              const sectionStatusMap = (cacheDiff && cacheDiff.sectionStatus) || {};
              const breakPoint = (cacheDiff && cacheDiff.breakPoint) || null;
-@@ -389,7 +401,8 @@
+@@ -360,6 +392,7 @@
+                 const sourceTags = (section.sources || []).map(src => (CONTEXT_SOURCE_CATEGORIES[src.category] || "") + " " + src.label).join(" ");
+                 return { ...section, tokens: estimateTavernTokens(section.text), searchText: (section.title + " " + sourceTags + " " + section.text).toLowerCase() };
+             }), [request]);
++            const injection = sections.find(section => isWhiteGloveMessage(section.value, "inject"));
+             const sourceCounts = React.useMemo(() => {
+                 const counts = {};
+                 for (const section of sections) {
+@@ -368,12 +401,10 @@
+                 }
+                 return Object.keys(CONTEXT_SOURCE_CATEGORIES).filter(cat => counts[cat] > 0).map(cat => ({ key: cat, label: CONTEXT_SOURCE_CATEGORIES[cat], count: counts[cat] }));
+             }, [sections]);
+-            // Contexts reach 100k+ characters; filter off the typing path.
+-            const deferredQuery = React.useDeferredValue(query.toLowerCase());
+             function downloadJson() {
+                 downloadTavernBlob(new Blob([text], { type: "application/json;charset=utf-8" }), "request-context.json");
+             }
+-            function handleJumpBreak(key) {
++            function jumpToSection(key) {
+                 if (query) setQuery("");
+                 if (sourceFilter !== "all") setSourceFilter("all");
+                 setJumpTarget(prev => ({ key, tick: prev.tick + 1 }));
+@@ -389,9 +420,13 @@
                      h("button", { disabled: loading, onClick: () => setRefresh(value => value + 1) }, loading ? "读取中…" : "刷新")),
                  record ? h("div", { className: "dsh-context-meta" },
                      h("span", { className: "dsh-context-badge" }, "第 " + record.turn + " 轮 · 步骤 " + record.step),
 -                    h("span", null, request.model || ""),
-+                    foregroundLabel ? h("span", { className: "dsh-context-badge" }, foregroundLabel) : null,
++                    foregroundMode ? h("span", { className: "dsh-context-badge" }, foregroundMode === "white-glove" ? "白手套模式 · 前台" : "普通前台") : null,
++                    injection ? h("button", { type: "button", className: "dsh-context-filter-chip", onClick: () => jumpToSection(injection.cacheKey) }, "查看白手套注入")
++                        : foregroundMode === "white-glove"
++                            ? h("span", null, "本轮无资料注入") : null,
 +                    h("span", null, request?.model || ""),
                      h("time", null, new Date(record.createdAt).toLocaleString())) : null,
-                 renderCacheDiffSummary(h, record, handleJumpBreak),
+-                renderCacheDiffSummary(h, record, handleJumpBreak),
++                renderCacheDiffSummary(h, record, jumpToSection),
                  h("div", { className: "dsh-context-toolbar" },
+                     h("input", { type: "search", "aria-label": "搜索完整上下文", placeholder: "搜索提示词、来源（如世界书/预设/插件）、消息或工具…", value: query, onChange: e => setQuery(e.target.value) }),
+                     request ? h("button", { onClick: async () => { try { await navigator.clipboard.writeText(text); } catch (e) { setError("复制失败：" + String(e.message || e)); } } }, "复制 JSON") : null,
 diff --git a/tavern-plugin/src/client/features/story-transcript-list.js b/tavern-plugin/src/client/features/story-transcript-list.js
 index 4555f27f0..44af243c2 100644
 --- a/tavern-plugin/src/client/features/story-transcript-list.js
@@ -1696,7 +1862,7 @@ index d1440acbc..e9de604cf 100644
  })
 
 diff --git a/tests/request-context.test.mjs b/tests/request-context.test.mjs
-index 4c3c0ba60..559d5053a 100644
+index 4c3c0ba60..65dc0db91 100644
 --- a/tests/request-context.test.mjs
 +++ b/tests/request-context.test.mjs
 @@ -5,6 +5,7 @@ import vm from 'node:vm'
@@ -1707,23 +1873,45 @@ index 4c3c0ba60..559d5053a 100644
 
 
  // The panel is a client fragment concatenated into the built bundle, so exercise
-@@ -22,6 +23,15 @@ const preset = (phase, text) => ({
+@@ -22,6 +23,37 @@ const preset = (phase, text) => ({
    source: { kind: 'plugin:dsh-tavern', form: 'snapshot', sections: [{ name: 'tavern:runtime-preset-' + phase, text }] }
  })
 
 +test('完整上下文按已记录的前台请求区分普通前台和白手套模式', () => {
 +  const reply = { scope: 'foreground', task: 'reply', request: { messages: [] } }
-+  assert.equal(client.describeForegroundRequest(reply), '普通前台')
++  assert.equal(client.foregroundRequestMode(reply), 'standard')
 +  const marker = { source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' } }
-+  assert.equal(client.describeForegroundRequest({ ...reply, request: { messages: [marker] } }), '白手套模式 · 前台')
-+  assert.equal(client.describeForegroundRequest({ ...reply, scope: 'background' }), '')
-+  assert.equal(client.describeForegroundRequest({ ...reply, task: 'compaction' }), '')
++  assert.equal(client.foregroundRequestMode({ ...reply, request: { messages: [marker] } }), 'white-glove')
++  const historicalInjection = { source: { ...marker.source, form: 'inject' } }
++  assert.equal(client.foregroundRequestMode({ ...reply, request: { messages: [historicalInjection] } }), 'white-glove')
++  assert.equal(client.foregroundRequestMode({ ...reply, scope: 'background' }), '')
++  assert.equal(client.foregroundRequestMode({ ...reply, task: 'compaction' }), '')
++})
++
++test('白手套注入保留实际回执和缓存位置，并按资料类型可筛选', () => {
++  const text = '【世界书 · 钟楼】\n钟声整点响。\n\n【写作指引】\n采用第三人称。\n\n【剧情记忆 · 第 1 轮】\n找到钥匙。\n\n【世界书 · 钟楼】\n钟声整点响。'
++  const content = [{ type: 'text', text }]
++  const request = { messages: [
++    { role: 'user', content, source: { kind: 'user' } },
++    { role: 'user', content, source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'inject' } }
++  ] }
++  const [player, injection] = sections(request)
++  assert.deepEqual(player.sources, [{ category: 'story', label: '玩家输入' }])
++  assert.deepEqual(injection.sources, [
++    { category: 'plugin', label: '白手套注入' },
++    { category: 'worldbook', label: '世界书' },
++    { category: 'skill', label: '写作 Skill' },
++    { category: 'story', label: '剧情记忆' }
++  ])
++  assert.deepEqual(injection.body, [text])
++  assert.deepEqual(injection.value, request.messages[1])
++  assert.equal(injection.cacheKey, extractPrefixSlots(request)[1].key)
 +})
 +
  test('工具定义夹在前置系统消息与普通消息之间，消息下标保持原样', () => {
    const request = {
      tools: [{ type: 'function', function: { name: 'tavern_read_play_chat' } }],
-@@ -31,6 +41,29 @@ test('工具定义夹在前置系统消息与普通消息之间，消息下标
+@@ -31,6 +63,29 @@ test('工具定义夹在前置系统消息与普通消息之间，消息下标
    assert.deepEqual(titles(request), ['messages[0] · system · 预设前段', 'messages[1] · system', 'tools · 工具定义', 'messages[2] · user', 'messages[3] · assistant'])
  })
 
