@@ -18,7 +18,7 @@ const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: 
 const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
 const input = { gameId: 'game', frame, context }
 
-function createFixture(readers, runTask) {
+function createFixture(readers, runTask, requestContext = context) {
   const execution = createPluginTaskExecution({
     runTask,
     requireGame: async sessionId => ({ sessionId }),
@@ -32,8 +32,37 @@ function createFixture(readers, runTask) {
     runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
   apply({ tavern: { capabilities: { writingPreparation: 5 }, writingPreparation: value => preparation.register('pure-writer', value) } })
-  return async () => preparation.prepare(await preparation.forGame(input.gameId), input)
+  return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext })
 }
+
+test('已有世界书原文按回合和同轮去重，内容有变化时保留实际回执', async () => {
+  const original = '【世界书 · 钟楼】\n塔钟在整点响。'
+  const previous = pureWritingInjection(frame, original + '\n\n【剧情记忆 · 第 1 轮】\n她曾敲钟。')
+  const requestContext = { ...context, messages: [previous, player] }
+  const changed = { title: '钟楼', text: '塔钟在半点响。' }
+  const prepare = createFixture({
+    worldbook: ({ query }) => query === '新版'
+      ? [changed, changed, { title: '侧门', text: '侧门朝北。' }]
+      : [{ title: '钟楼', text: '塔钟在整点响。' }]
+  }, async task => {
+    assert.match(await task.call('find_worldbook', { query: '旧版' }), /已在上下文/)
+    assert.equal(await task.call('find_worldbook', { query: '新版' }), '【世界书 · 钟楼】\n塔钟在半点响。\n\n【世界书 · 侧门】\n侧门朝北。')
+    assert.match(await task.call('find_worldbook', { query: '新版' }), /已在上下文/)
+  }, requestContext)
+  assert.equal(await prepare(), '【世界书 · 钟楼】\n塔钟在半点响。\n\n【世界书 · 侧门】\n侧门朝北。')
+})
+
+test('同一白手套的前轮工具轨迹不重复进入本轮查询', () => {
+  const task = id => ({ id, role: 'user', source: { kind: 'plugin:dsh-tavern', form: 'writing-preparation-task' } })
+  const receipt = id => ({ id, role: 'tool', content: [{ type: 'text', text: id }] })
+  const previousTask = task('past')
+  const currentTask = task('current')
+  const currentReceipt = receipt('current receipt')
+  const projected = projectWritingPreparationRequest({
+    messages: [{ role: 'system' }, previousTask, receipt('past receipt'), currentTask, currentReceipt]
+  }, context)
+  assert.deepEqual(projected.messages, [...context.messages, currentTask, currentReceipt])
+})
 
 test('自动交接按调用顺序保留完整回执和重复结果', async () => {
   const skill = Promise.withResolvers()

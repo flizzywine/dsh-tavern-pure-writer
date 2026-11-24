@@ -1,11 +1,11 @@
 diff --git a/tavern-plugin/lib/background-agent-sessions.js b/tavern-plugin/lib/background-agent-sessions.js
-index 2b9456082..bc70f1178 100644
+index 2b9456082..c25b840c1 100644
 --- a/tavern-plugin/lib/background-agent-sessions.js
 +++ b/tavern-plugin/lib/background-agent-sessions.js
 @@ -1,12 +1,11 @@
  import { appendSessionEvent, matchesEventType, sessionEvents } from './domain/session-events.js'
 -import { STAGE_DIRECTOR_DESCRIPTOR, subagentDescriptor } from './domain/background-descriptors.js'
-+import { LEGACY_BACKGROUND_PROVIDER, STAGE_DIRECTOR_DESCRIPTOR, WRITING_PREPARATION_DESCRIPTOR, subagentDescriptor } from './domain/background-descriptors.js'
++import { LEGACY_BACKGROUND_PROVIDER, STAGE_DIRECTOR_DESCRIPTOR, WRITING_PREPARATION_DESCRIPTOR, WRITING_PREPARATION_PROVIDER, subagentDescriptor } from './domain/background-descriptors.js'
  import { randomUUID } from 'node:crypto'
  import { maximumBackgroundTokens, traceError } from './background-agent-task.js'
  import { createBackgroundRunLedger } from './background-run-ledger.js'
@@ -16,15 +16,34 @@ index 2b9456082..bc70f1178 100644
  const BACKGROUND_PROVIDER = 'dsh-tavern-background-tools-v4'
  const STALE_BACKGROUND_PROVIDERS = new Set([
    LEGACY_BACKGROUND_PROVIDER,
-@@ -194,6 +193,7 @@ export function createBackgroundAgentSessions(options, task) {
+@@ -169,6 +168,7 @@ export function createBackgroundAgentSessions(options, task) {
+   // The resident member a persistent task runs on (background-members.js): the plugin member it
+   // names, else its built-in one, else 书记.
+   function memberFor(input) {
++    if (input.writingPreparation) return 'writing-preparation'
+     return (pluginMember(input.member) && input.member) || memberOf(input.task) || 'background'
+   }
+
+@@ -190,6 +190,7 @@ export function createBackgroundAgentSessions(options, task) {
+   }
+
+   function descriptorFor(input, persistent) {
++    if (input.writingPreparation) return WRITING_PREPARATION_DESCRIPTOR
+     const member = persistent ? pluginMember(input.member) : null
      if (member) return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-plugin-member-v1', label: '插件成员：' + member.name })
      if (input.task === 'polish') return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-polish', label: '正文精修', agentProvider: input.selection.provider, agentModel: input.selection.model, persona: '只审读正文，通过精修工具逐处提交修改。' })
-     if (input.task === 'stage-director') return STAGE_DIRECTOR_DESCRIPTOR
-+    if (input.task === 'plugin' && input.writingPreparation) return WRITING_PREPARATION_DESCRIPTOR
-     if (input.task === 'plugin') return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '插件任务' + (input.pluginName ? '：' + String(input.pluginName).slice(0, 60) : '') })
-     if (!persistent) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '候选研究' })
-     return subagentDescriptor({
-@@ -368,6 +368,7 @@ export function createBackgroundAgentSessions(options, task) {
+@@ -296,7 +297,9 @@ export function createBackgroundAgentSessions(options, task) {
+             const savedDescriptor = sessionEvents(session).find(event => matchesEventType(event, 'subagent/descriptor'))?.data
+             const savedParent = session.header?.parentSession
+             if (savedParent && savedParent !== parent.id || savedDescriptor &&
+-              (savedDescriptor.provider === 'dsh-tavern-image' || (savedDescriptor.provider === 'dsh-tavern-polish') !== (input.task === 'polish'))) {
++              (savedDescriptor.provider === 'dsh-tavern-image'
++                || (savedDescriptor.provider === 'dsh-tavern-polish') !== (input.task === 'polish')
++                || (savedDescriptor.provider === WRITING_PREPARATION_PROVIDER) !== Boolean(input.writingPreparation))) {
+               await handle.dispose()
+               throw new Error('持久后台 Agent 的父会话或任务类型不匹配，未创建替代会话')
+             }
+@@ -368,6 +371,7 @@ export function createBackgroundAgentSessions(options, task) {
        maxTokens,
        operationId: str(input.operationId),
        ...(input.contextPolicy ? { contextPolicy: input.contextPolicy } : {}),
@@ -33,7 +52,7 @@ index 2b9456082..bc70f1178 100644
        task: str(input.task) || 'background',
        // Dev diagnostics: the streaming director window this request stages (request log).
 diff --git a/tavern-plugin/lib/background-agent-task.js b/tavern-plugin/lib/background-agent-task.js
-index 8fb5366e3..e792c715b 100644
+index 8fb5366e3..ead012cf6 100644
 --- a/tavern-plugin/lib/background-agent-task.js
 +++ b/tavern-plugin/lib/background-agent-task.js
 @@ -242,6 +242,7 @@ export function createBackgroundAgentTask(options) {
@@ -44,6 +63,16 @@ index 8fb5366e3..e792c715b 100644
          const snapshot = typeof options.resolveRuntimePresetSnapshot === 'function'
            ? await options.resolveRuntimePresetSnapshot({
              sessionId: input.sessionId,
+@@ -596,7 +597,8 @@ export function createBackgroundAgentTask(options) {
+         id: randomUUID(),
+         role: 'user',
+         content: [{ type: 'text', text: taskText }],
+-        source: { kind: 'plugin:dsh-tavern', ...(systemUpdate ? { trace: cardSystemPromptSource(systemUpdate) } : {}), ...(snapshot ? { worldbookSnapshot: snapshot } : {}), ...(scriptContext?.body ? {
++        source: { kind: 'plugin:dsh-tavern', ...(input.writingPreparation ? { form: 'writing-preparation-task' } : {}),
++          ...(systemUpdate ? { trace: cardSystemPromptSource(systemUpdate) } : {}), ...(snapshot ? { worldbookSnapshot: snapshot } : {}), ...(scriptContext?.body ? {
+           candidateScriptWindow: { version: 1, start: taskText.indexOf(scriptContext.body), length: scriptContext.body.length, digest: scriptContext.digest }
+         } : {}) }
+       })
 diff --git a/tavern-plugin/lib/client.js b/tavern-plugin/lib/client.js
 index 8dccea205..1325d14ae 100644
 --- a/tavern-plugin/lib/client.js
@@ -295,10 +324,10 @@ index 8dccea205..1325d14ae 100644
                      h("input", { type: "search", "aria-label": "搜索完整上下文", placeholder: "搜索提示词、来源（如世界书/预设/插件）、消息或工具…", value: query, onChange: e => setQuery(e.target.value) }),
                      request ? h("button", { onClick: async () => { try { await navigator.clipboard.writeText(text); } catch (e) { setError("复制失败：" + String(e.message || e)); } } }, "复制 JSON") : null,
 diff --git a/tavern-plugin/lib/domain/background-descriptors.js b/tavern-plugin/lib/domain/background-descriptors.js
-index 5095d9330..5e0ddb7b6 100644
+index 5095d9330..ef0c0dbf3 100644
 --- a/tavern-plugin/lib/domain/background-descriptors.js
 +++ b/tavern-plugin/lib/domain/background-descriptors.js
-@@ -17,6 +17,8 @@ export function subagentDescriptor(input) {
+@@ -17,6 +17,9 @@ export function subagentDescriptor(input) {
  }
 
  export const STAGE_DIRECTOR_PROVIDER = 'dsh-tavern-stage-director'
@@ -306,7 +335,8 @@ index 5095d9330..5e0ddb7b6 100644
 
  // One-shot children carry only version, mode, provider and label.
  export const STAGE_DIRECTOR_DESCRIPTOR = subagentDescriptor({ mode: 'one-shot', provider: STAGE_DIRECTOR_PROVIDER, label: '舞台导演' })
-+export const WRITING_PREPARATION_DESCRIPTOR = subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '白手套 Agent' })
++export const WRITING_PREPARATION_PROVIDER = 'dsh-tavern-writing-preparation'
++export const WRITING_PREPARATION_DESCRIPTOR = subagentDescriptor({ mode: 'continuable', provider: WRITING_PREPARATION_PROVIDER, label: '白手套 Agent' })
 diff --git a/tavern-plugin/lib/domain/compaction-checkpoint.js b/tavern-plugin/lib/domain/compaction-checkpoint.js
 index 13631f301..ac8a6c954 100644
 --- a/tavern-plugin/lib/domain/compaction-checkpoint.js
@@ -636,10 +666,10 @@ index 3e45bef52..f7ff36cf6 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..3800cea95
+index 000000000..3659a59ca
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,83 @@
 +import { isCompactionCheckpointMessage } from './compaction-checkpoint.js'
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
@@ -696,8 +726,13 @@ index 000000000..3800cea95
 +}
 +
 +export function projectWritingPreparationRequest(request, context) {
++  // Native history keeps every task for the trace. The foreground conversation
++  // already carries previous receipts, so replay only this task's native calls.
++  const start = request.messages.findLastIndex(message => message.source?.kind === 'plugin:dsh-tavern'
++    && message.source.form === 'writing-preparation-task')
++  const task = request.messages.slice(Math.max(0, start)).filter(message => message.role !== 'system')
 +  return { ...request, system: context.system,
-+    messages: [...structuredClone(context.messages), ...writingRequestMessages(request.messages.filter(message => message.role !== 'system'))] }
++    messages: [...structuredClone(context.messages), ...writingRequestMessages(task)] }
 +}
 +
 +export function pureWritingInjection(frame, material) {
@@ -1064,10 +1099,10 @@ index 000000000..2a9decb03
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..26c632e66
+index 000000000..efa694901
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,128 @@
 +import { untilAborted } from './plugin-callback.js'
 +import { writingMaterialText } from './writing-material-text.js'
 +
@@ -1080,6 +1115,23 @@ index 000000000..26c632e66
 +
 +const TIMEOUT_MS = 120000
 +const NO_MATERIAL = '没有查到资料。'
++const ALREADY_IN_CONTEXT = '命中的世界书条目已在上下文中，可以直接沿用。'
++
++function worldbookInContext(messages) {
++  const seen = new Set()
++  for (const message of messages || []) {
++    if (message.source?.kind !== 'plugin:dsh-tavern-pure-writer' || message.source.form !== 'inject') continue
++    for (const block of message.content || []) {
++      if (block.type !== 'text') continue
++      const text = block.text
++      const headings = [...text.matchAll(/^【(世界书|写作指引|写作 Skill|剧情记忆|当前变量)(?: · [^】\r\n]+)?】$/gm)]
++      for (const [index, heading] of headings.entries()) {
++        if (heading[1] === '世界书') seen.add(text.slice(heading.index, headings[index + 1]?.index).trimEnd())
++      }
++    }
++  }
++  return seen
++}
 +
 +export function createWritingPreparation({ allowed, runAgent, readSources }) {
 +  const entries = new Map()
@@ -1110,6 +1162,7 @@ index 000000000..26c632e66
 +    const done = new AbortController()
 +    const requestSignal = AbortSignal.any([done.signal, entry.lifetime.signal, AbortSignal.timeout(TIMEOUT_MS), ...(signal ? [signal] : [])])
 +    const toolResults = []
++    const worldbookSeen = worldbookInContext(context.messages)
 +    let submitted
 +    const sourceReaders = readSources({ gameId, frame, chat, signal: requestSignal })
 +
@@ -1119,17 +1172,25 @@ index 000000000..26c632e66
 +      const limits = SOURCE_LIMITS[kind]
 +      const rows = await sourceReaders[kind](args ?? {})
 +      requestSignal.throwIfAborted()
-+      const text = rows.slice(0, 8).flatMap(row => {
++      const material = rows.slice(0, 8).flatMap(row => {
 +        const text = writingMaterialText(row.text).slice(0, limits.read)
 +        const title = writingMaterialText(row.title).slice(0, 120)
 +        return text ? ['【' + limits.label + (title ? ' · ' + title : '') + '】\n' + text] : []
-+      }).join('\n\n')
-+      return text || NO_MATERIAL
++      })
++      if (!material.length) return NO_MATERIAL
++      if (kind !== 'worldbook') return material.join('\n\n')
++      const fresh = material.filter(entry => {
++        const key = entry.trimEnd()
++        if (worldbookSeen.has(key)) return false
++        worldbookSeen.add(key)
++        return true
++      })
++      return fresh.length ? fresh.join('\n\n') : ALREADY_IN_CONTEXT
 +    }
 +
 +    function collectToolText() {
 +      return untilAborted(Promise.all(toolResults), requestSignal).then(results =>
-+        results.filter(result => result.ok && result.text !== NO_MATERIAL).map(result => result.text).join('\n\n'))
++        results.filter(result => result.ok && result.text !== NO_MATERIAL && result.text !== ALREADY_IN_CONTEXT).map(result => result.text).join('\n\n'))
 +    }
 +
 +    function inject(args = {}) {
@@ -1389,7 +1450,7 @@ index 422058325..9751c658e 100644
      const nativeWorldbook = needWorldbook && chat.worldbookStrategy === 'native-skills'
      const needPlugins = Boolean(pluginPromptSections && chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(mode))
 diff --git a/tavern-plugin/lib/index.js b/tavern-plugin/lib/index.js
-index a607f42ee..6ca0aa470 100644
+index a607f42ee..e60646a47 100644
 --- a/tavern-plugin/lib/index.js
 +++ b/tavern-plugin/lib/index.js
 @@ -41,7 +41,7 @@ import { registerRequestHooks } from './hooks/request.js'
@@ -1409,7 +1470,15 @@ index a607f42ee..6ca0aa470 100644
  import { createSceneWorldbooks } from './domain/scene-worldbook.js'
  import { createSessionStablePrefixStorage, ensureSessionStablePrefix, readSessionStablePrefix } from './domain/session-stable-prefix.js'
  import { waitForWritableSession } from './domain/agent-readiness.js'
-@@ -874,7 +875,8 @@ export async function apply(ctx) {
+@@ -737,6 +738,7 @@ export async function apply(ctx) {
+   const cardMemory = createCardMemory({ dataRoot })
+   const stablePrefixStorage = createSessionStablePrefixStorage(dataRoot + '/session-prefixes')
+   const profileData = createProfileDataStore({ dataRoot })
++  const writingPreparationBindingPath = sessionId => 'writing-preparation-sessions/' + encodeURIComponent(sessionId) + '.json'
+   const generationStreamModes = createGenerationStreamModeStore(profileData)
+   ctx.effect(() => installGenerationStreamModeHook(ctx, () => generationStreamModes.get()))
+   const frameStorage = createFrameStorage(profileData)
+@@ -874,7 +876,8 @@ export async function apply(ctx) {
      updateJson: async function (path, updater) { return await profileData.updateJson(path, updater) },
      writeText: async function (path, text) { return await profileData.writeBytes(path, Buffer.from(text, 'utf8')) },
      remove: async function (path) { return await profileData.remove(path) },
@@ -1419,7 +1488,15 @@ index a607f42ee..6ca0aa470 100644
    })
    // A single SKILL.md arrives as text; a skill folder arrives as a ZIP. Only UTF-8 Markdown is read.
    function skillImportFiles(args) {
-@@ -3375,17 +3377,19 @@ export async function apply(ctx) {
+@@ -2057,6 +2060,7 @@ export async function apply(ctx) {
+       if (sessionId) {
+         await apiDiagnostics.forget(sessionId)
+         await backgroundAgentRunner.releaseFor(sessionId)
++        await profileData.remove(writingPreparationBindingPath(sessionId))
+       }
+       // A session DSH still holds loaded would be written back; delete it on the next start.
+       const live = footprint.items.filter(item => item.category === 'subsession' && agentRegistry.get(item.sessionId))
+@@ -3375,19 +3379,32 @@ export async function apply(ctx) {
    // A plugin's one-off task: a fresh background Session, never the resident one settlement uses.
    // A member with a prefix of its own (`system`): that prefix, and the prompt as the task's one
    // message; the plugin hands it whatever story it needs.
@@ -1434,14 +1511,28 @@ index a607f42ee..6ca0aa470 100644
 -    const own = system !== undefined ? { ownPrefix: true, system, taskText: prompt, messages: [] } : { system: prompt, messages: recent }
 +    const ownSystem = writingPreparation?.system ?? system
 +    const own = ownSystem !== undefined ? { ownPrefix: true, system: ownSystem, taskText: prompt, messages: [] } : { system: prompt, messages: recent }
++    if (writingPreparation) {
++      const file = writingPreparationBindingPath(gameId)
++      let boundId = ''
++      resolvePersistentSessionId = async () => {
++        boundId = str((await profileData.readJson(file))?.sessionId)
++        return boundId
++      }
++      onPersistentSessionReady = async sessionId => {
++        if (boundId !== sessionId) await profileData.writeJson(file, { sessionId })
++      }
++    }
      return await backgroundAgentRunner.run({
        task: 'plugin',
        pluginName: id ? owner + '/' + id : owner,
 +      writingPreparation,
        member,
-       persistent: Boolean(member),
+-      persistent: Boolean(member),
++      persistent: Boolean(member || writingPreparation),
        sessionId: gameId,
-@@ -3416,6 +3420,13 @@ export async function apply(ctx) {
+       selection,
+       signal,
+@@ -3416,6 +3433,13 @@ export async function apply(ctx) {
    const figurePictures = createFigurePictures(() => ctx.get('assetLibrary'))
    pluginApi = createTavernPluginApi({
      ctx,get modHost() {return ctx.get('tavernManagedModules')},
@@ -1455,7 +1546,7 @@ index a607f42ee..6ca0aa470 100644
      replyStreamRewriters,
      logger: console,
      // The asset packs a card plays with: its own and the ones every card uses.
-@@ -3673,6 +3684,7 @@ export async function apply(ctx) {
+@@ -3673,6 +3697,7 @@ export async function apply(ctx) {
    })
    const pluginBodyGeneration = createPluginBodyGeneration({ chatForSession, routeChatForSession: sessionId => chatHeaderForSession(sessionId, ['mode', 'foregroundFrames', 'timeline']), readRevision: readChatRevision,
      updateChat, settings: readTavernSettings, providers: pluginApi.bodyGenerators,
@@ -1463,7 +1554,7 @@ index a607f42ee..6ca0aa470 100644
      isWorldbookPath: filePath => worldbookSkillProvider.ownsPath(filePath),
      isBackground: sessionId => backgroundAgentRunner.owns(sessionId),
      regenerateWithProvider: input => regenerateWithProvider(input) })
-@@ -4509,7 +4521,7 @@ export async function apply(ctx) {
+@@ -4509,7 +4534,7 @@ export async function apply(ctx) {
      prepareRegenerationFrameCache: async ({ chat, card, turn, userText, target, targetAssistantIndex }) => {
        if (!chat || !card || !['story', 'script'].includes(chat.mode || 'story')) return null
        const settings = await readTavernSettings()
@@ -1472,7 +1563,7 @@ index a607f42ee..6ca0aa470 100644
        const preset = await resolveChatRuntimePreset({ ...chat }, { preview: true })
        const worldBook = await playWorldBook(chat, card)
        const targetRow = targetAssistantIndex >= 0 ? chat.messages?.[targetAssistantIndex] : null
-@@ -5071,6 +5083,7 @@ export async function apply(ctx) {
+@@ -5071,6 +5096,7 @@ export async function apply(ctx) {
    const controlledToolNames = new Set([...modTools.map(tool => tool.name), 'style_reference_submit', STORY_SUBMIT_TOOL_NAME, STORY_CONTEXT_TOOL_NAME, STORY_GENERATE_TOOL_NAME, 'tavern_read_variables', ...WORLDBOOK_ACCESS_TOOLS, ...CARD_MEMORY_TOOLS, 'bash', 'pwsh', ...dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'tavern_read_skill', 'web_search', 'web_fetch', 'tavern_save_skill', ...cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_user_profile_confirm', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_search_card', 'tavern_replace_card_text', 'tavern_mvu_overview', 'tavern_apply_mvu', 'tavern_read_play_chat', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search', WORKBENCH_READ_LOREBOOK_TOOL, WORKBENCH_UPDATE_LOREBOOK_TOOL, 'tavern_read_preset', 'tavern_update_preset', 'tavern_read_regex_library', 'tavern_copy_card', 'tavern_set_card_cover', 'tavern_export_card_png', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card', 'tavern_test_response'])
    const foregroundStrategies = createForegroundOrchestrationStrategies({
      nativePlay: {
@@ -1480,7 +1571,7 @@ index a607f42ee..6ca0aa470 100644
        // Input side: replay past bodies as calls of the submission tool.
        styleReferencePrompt: chat => foregroundStyleReferencePrompt(chat, runtimePrompt('style-reference-recall'), runtimePrompt('style-reference')),
        foregroundCandidatePrompt: async chat => chat?.backgroundTasks?.foregroundCandidates === true
-@@ -5209,6 +5222,7 @@ export async function apply(ctx) {
+@@ -5209,6 +5235,7 @@ export async function apply(ctx) {
      runtimePrompt,
      sessionStore,
      storyOutputToolCall: async () => (await readTavernSettings()).storyOutputToolCall,
@@ -1488,7 +1579,7 @@ index a607f42ee..6ca0aa470 100644
      turnOrchestrator,
      userMessageForTurn,
    })
-@@ -5222,7 +5236,8 @@ export async function apply(ctx) {
+@@ -5222,7 +5249,8 @@ export async function apply(ctx) {
        pluginGeneration: async sessionId => (await pluginBodyGeneration.route(sessionId)).mode?.startsWith('plugin-'),
        // Input-only requests still declare the tool for their replayed history;
        // accepting a real submission there is harmless.
