@@ -1,4 +1,4 @@
-# DSH Tavern 纯净写作
+# DSH Tavern White Glove
 
 `dsh-tavern-pure-writer` 是独立安装的 DSH Tavern 插件。它把查询和工具调用交给白手套 Agent，让前台 Agent 专注生成正文，只保留防截断用的 `submit_story`。
 
