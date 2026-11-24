@@ -1,4 +1,4 @@
-# DSH Tavern White Glove
+# dsh-tavern-white-glove
 
 `dsh-tavern-pure-writer` 是独立安装的 DSH Tavern 插件。它把查询和工具调用交给白手套 Agent，让前台 Agent 专注生成正文，只保留防截断用的 `submit_story`。
 
@@ -17,7 +17,7 @@ git -C /path/to/dsh-tavern apply /path/to/dsh-tavern-pure-writer/compat/tavern-h
 
 将仓库克隆到所用 Tavern 的持久数据目录 `plugins/dsh-tavern-pure-writer/` 下，或将插件包解压到这个位置。CLI 版默认的目标目录是 `~/.dsh-tavern/profile-data/tavern/data/plugins/dsh-tavern-pure-writer/`。重启宿主，在「设置 → DSH Tavern → 插件」确认插件已加载。停用插件后，下一轮恢复 Tavern 的原有生成流程。
 
-从右侧栏「插件 → DSH Tavern White Glove」配置当前对局。已安装的插件默认接管写作流程，白手套的模型默认跟随前台，也可以选择独立模型。关闭本局接管后，下一轮恢复原有生成流程。
+从右侧栏「插件 → 白手套」配置当前对局。已安装的插件默认接管写作流程，白手套的模型默认跟随前台，也可以选择独立模型。关闭本局接管后，下一轮恢复原有生成流程。
 
 白手套查完直接结束。写作 Skill 与参考资料用于白手套本轮查询，世界书、记忆和变量的有效回执才交给前台。有回执时，程序将原文保存在当轮玩家输入与正文之间，后续请求随会话历史读取。查询结果为空时，程序直接开始正文生成。
 

@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
       inject: ['tavernUi'],
       apply({ tavernUi: ui }) {
         ui.registerPanel({
-          id: 'white-glove', title: 'DSH Tavern White Glove',
+          id: 'white-glove', title: '白手套',
           render: ({ gameId, visible }) => h(Settings, { key: gameId, ui, gameId, visible })
         })
       }
