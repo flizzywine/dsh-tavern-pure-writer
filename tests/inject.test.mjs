@@ -12,6 +12,7 @@ const { createWritingPreparationSources } = await domain('writing-preparation-so
 const { createPluginTaskExecution } = await domain('plugin-task-execution.js')
 const { createNativePlayOrchestrationStrategy } = await domain('foreground-orchestration-strategies.js')
 const { projectPureWritingRequest, projectWritingPreparationRequest, pureWritingContext } = await domain('pure-writing-request.js')
+const { registerModelStreamHooks } = await import(pathToFileURL(resolve(host, 'tavern-plugin/lib/hooks/model-stream.js')))
 const frame = { frameId: 'frame:writing', turn: 3, contributions: [], source: {} }
 const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '去钟楼' }] }
 const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
@@ -139,6 +140,34 @@ test('白手套沿用前台实际发出的设定、原文历史和本轮输入�
   assert.deepEqual(foreground.messages.slice(0, -2), preparation.messages.slice(0, -2))
   assert.deepEqual(preparation.messages.slice(-2), [task, result])
   assert.equal(foreground.messages.at(-1).content[0].text, result.content[0].text)
+})
+
+test('白手套的共享历史复用前台投影，跳过通用后台请求改写', async () => {
+  const hooks = []
+  const ctx = {
+    on(event, hook) { if (event === 'llm/stream') hooks.push(hook) },
+    llm: { stream(request) {
+      const downstream = async function * () {
+        yield request
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+      const dispatch = index => hooks[index]?.(request, () => dispatch(index + 1)) ?? downstream()
+      return dispatch(0)
+    } }
+  }
+  const context = pureWritingContext('钟楼设定。', [
+    { id: 'old', role: 'assistant', content: [{ type: 'text', text: '她走到钟楼。' }] }, player
+  ])
+  registerModelStreamHooks({
+    ctx, requestCoordinates: new Map(), str: value => String(value ?? ''),
+    chatHeaderForSession: async () => undefined, sessionStore: new Map(), agentRegistry: new Map(),
+    backgroundAgentRunner: { owns: () => true, requestContext: () => ({ parentSessionId: 'game', writingPreparation: context }) },
+    foregroundStrategies: { projectRequest: () => assert.fail('共享历史不进入通用请求改写'), completeRequest() {} }
+  })
+  const task = { id: 'task', role: 'user', content: [{ type: 'text', text: '查资料。' }] }
+  const [request] = await Array.fromAsync(ctx.llm.stream({ sessionId: 'white-glove', provider: 'deepseek-official', messages: [task] }))
+  assert.equal(request.system, context.system)
+  assert.deepEqual(request.messages, [...context.messages, task])
 })
 
 test('空查询回执留在白手套的工具记录中，前台直接开始写作', async () => {

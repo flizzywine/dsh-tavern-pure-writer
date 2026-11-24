@@ -18,6 +18,18 @@ index 2b9456082..af69032c4 100644
        ...(input.frozenBackground ? { frozenBackground: { policy: input.frozenBackground.policy, historical: input.frozenBackground.historical, binding: input.frozenBackground.binding } } : {}),
        task: str(input.task) || 'background',
        // Dev diagnostics: the streaming director window this request stages (request log).
+diff --git a/tavern-plugin/lib/background-agent-task.js b/tavern-plugin/lib/background-agent-task.js
+index 8fb5366e3..e792c715b 100644
+--- a/tavern-plugin/lib/background-agent-task.js
++++ b/tavern-plugin/lib/background-agent-task.js
+@@ -242,6 +242,7 @@ export function createBackgroundAgentTask(options) {
+         }
+         if (decision.kind !== 'enter') return decision
+         const input = state.input || {}
++        if (input.writingPreparation) return decision
+         const snapshot = typeof options.resolveRuntimePresetSnapshot === 'function'
+           ? await options.resolveRuntimePresetSnapshot({
+             sessionId: input.sessionId,
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 index 61d5af4e6..f1e0995b1 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
@@ -691,7 +703,7 @@ index 000000000..fdfec5faf
 +  return { register, forGame, prepare }
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
-index 442447f8f..897c386e1 100644
+index 442447f8f..7a0c377e9 100644
 --- a/tavern-plugin/lib/hooks/model-stream.js
 +++ b/tavern-plugin/lib/hooks/model-stream.js
 @@ -14,6 +14,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
@@ -702,11 +714,13 @@ index 442447f8f..897c386e1 100644
  
  // Prompt prose source. Keys are stable; interpolation arguments are data.
  export const PROMPT_PROSE = Object.freeze({
-@@ -156,12 +157,22 @@ export function registerModelStreamHooks({
+@@ -156,12 +157,23 @@ export function registerModelStreamHooks({
          source: { kind: 'model', provider: str(options.provider), model: str(options.model) }
        }))
      }
-+    const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
+-    const projectedRequest = (requestHandledBy(options, 'full-template') || importContextPreparation.isPrepared(options)) ? null : foregroundStrategies.projectRequest(options, coordinates)
+-    if (projectedRequest !== null) return ctx.llm.stream(projectedRequest)
+     const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
 +    const writingContext = backgroundContext?.writingPreparation
 +    if (options.purpose === undefined && writingContext && !requestHandledBy(options, WRITING_PREPARATION_REQUEST)) {
 +      return ctx.llm.stream(markRequestHandled(projectWritingPreparationRequest(options, writingContext), WRITING_PREPARATION_REQUEST))
@@ -716,9 +730,9 @@ index 442447f8f..897c386e1 100644
 +        yield * ctx.llm.stream(await foregroundStrategies.prepareWritingRequest(options))
 +      })()
 +    }
-     const projectedRequest = (requestHandledBy(options, 'full-template') || importContextPreparation.isPrepared(options)) ? null : foregroundStrategies.projectRequest(options, coordinates)
-     if (projectedRequest !== null) return ctx.llm.stream(projectedRequest)
--    const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
++    const projectedRequest = (!writingContext && !requestHandledBy(options, 'full-template') && !importContextPreparation.isPrepared(options))
++      ? foregroundStrategies.projectRequest(options, coordinates) : null
++    if (projectedRequest !== null) return ctx.llm.stream(projectedRequest)
      const ownerSessionId = backgroundContext ? backgroundContext.parentSessionId : sessionId
      return (async function * () {
 -      if (!backgroundContext && options.purpose === undefined && pluginBodyGeneration) {
@@ -727,7 +741,7 @@ index 442447f8f..897c386e1 100644
          const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
          const direct = await pluginBodyGeneration.direct(session, options.signal)
          if (direct) { yield * direct; return }
-@@ -169,12 +180,12 @@ export function registerModelStreamHooks({
+@@ -169,12 +181,12 @@ export function registerModelStreamHooks({
        // a director already owns frozen, projected sources.
        const director = backgroundContext?.task === 'stage-director'
        if (director) assertFrozenStageRequest(backgroundContext, options)
