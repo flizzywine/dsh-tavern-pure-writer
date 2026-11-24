@@ -836,7 +836,7 @@ index 000000000..ccd19a695
 +  })
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
-index 442447f8f..7a0c377e9 100644
+index 442447f8f..bc1085dea 100644
 --- a/tavern-plugin/lib/hooks/model-stream.js
 +++ b/tavern-plugin/lib/hooks/model-stream.js
 @@ -14,6 +14,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
@@ -847,7 +847,31 @@ index 442447f8f..7a0c377e9 100644
  
  // Prompt prose source. Keys are stable; interpolation arguments are data.
  export const PROMPT_PROSE = Object.freeze({
-@@ -156,12 +157,23 @@ export function registerModelStreamHooks({
+@@ -29,6 +30,23 @@ export function applyCompactionModel(request, selection) {
+   return next
+ }
+
++function writingPreparationStreamFilter() {
++  const textByIndex = new Map()
++  return chunk => {
++    const isText = chunk.type === 'text-delta' || (chunk.type === 'block-start' && chunk.blockType === 'text')
++      || (chunk.type === 'block-end' && chunk.block?.type === 'text')
++    if (Number.isInteger(chunk.index) && !textByIndex.has(chunk.index)) textByIndex.set(chunk.index, isText)
++    if (isText) return null
++    if (chunk.type !== 'finish' || !Array.isArray(chunk.replayState?.blocks)) return chunk
++    const textBlocks = [...textByIndex.values()]
++    if (!textBlocks.some(Boolean)) return chunk
++    // Replay entries are positional in the original response, including the removed text.
++    const { replayState, ...finish } = chunk
++    if (replayState.blocks.length !== textBlocks.length) return finish
++    return { ...finish, replayState: { ...replayState, blocks: replayState.blocks.filter((_, index) => !textBlocks[index]) } }
++  }
++}
++
+ export function registerModelStreamHooks({
+   agentRegistry,
+   pluginBodyGeneration,
+@@ -156,12 +174,24 @@ export function registerModelStreamHooks({
          source: { kind: 'model', provider: str(options.provider), model: str(options.model) }
        }))
      }
@@ -869,12 +893,13 @@ index 442447f8f..7a0c377e9 100644
      const ownerSessionId = backgroundContext ? backgroundContext.parentSessionId : sessionId
      return (async function * () {
 -      if (!backgroundContext && options.purpose === undefined && pluginBodyGeneration) {
-+      const pureWriting = requestHandledBy(options, PURE_WRITING_REQUEST) || requestHandledBy(options, WRITING_PREPARATION_REQUEST)
++      const writingPreparation = requestHandledBy(options, WRITING_PREPARATION_REQUEST)
++      const pureWriting = requestHandledBy(options, PURE_WRITING_REQUEST) || writingPreparation
 +      if (!pureWriting && !backgroundContext && options.purpose === undefined && pluginBodyGeneration) {
          const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
          const direct = await pluginBodyGeneration.direct(session, options.signal)
          if (direct) { yield * direct; return }
-@@ -169,12 +181,12 @@ export function registerModelStreamHooks({
+@@ -169,12 +199,12 @@ export function registerModelStreamHooks({
        // a director already owns frozen, projected sources.
        const director = backgroundContext?.task === 'stage-director'
        if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -889,6 +914,25 @@ index 442447f8f..7a0c377e9 100644
          const projected = await fullTemplateRuntime.forSession(ownerSessionId).projectRequestProjection({ messages: options.messages, system: options.system, model: options.model })
          yield * ctx.llm.stream(markRequestHandled({ ...options, ...projected }, 'full-template'))
          return
+@@ -264,6 +294,7 @@ export function registerModelStreamHooks({
+           })
+         : null
+       let finish = null, usage = null
++      const filterPreparation = writingPreparation ? writingPreparationStreamFilter() : null
+       // 改写补出来的 text-delta 要沿用同一段正文的 index，assembler 靠它把 token 并进同一个正文块。
+       let rewriteIndex = null
+       let failure = null, interrupted = false
+@@ -277,6 +308,10 @@ export function registerModelStreamHooks({
+           if (item.done) {exhausted = true; break}
+           let chunk = item.value
+           liveness.chunk(chunk)
++          if (filterPreparation && chunk) {
++            chunk = filterPreparation(chunk)
++            if (chunk === null) continue
++          }
+           if (chunk && chunk.type === 'text-delta') {
+             const delta = str(chunk.text)
+             if (rewriteStream) {
 diff --git a/tavern-plugin/lib/hooks/request.js b/tavern-plugin/lib/hooks/request.js
 index 2bb454a15..f3f8d8f90 100644
 --- a/tavern-plugin/lib/hooks/request.js

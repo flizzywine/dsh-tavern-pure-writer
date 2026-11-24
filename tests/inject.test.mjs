@@ -146,14 +146,26 @@ test('白手套沿用前台实际发出的设定、原文历史和本轮输入�
   assert.equal(foreground.messages.at(-1).content[0].text, result.content[0].text)
 })
 
-test('白手套的共享历史复用前台投影，跳过通用后台请求改写', async () => {
+test('白手套沿用前台历史，流式输出只留下思考、工具调用和完成信号', async () => {
   const hooks = []
+  const thinking = { type: 'reasoning-delta', index: 0, text: '查钟楼设定。' }
+  const toolStart = { type: 'block-start', index: 5, blockType: 'tool-call' }
+  const toolEnd = { type: 'block-end', index: 5, block: { type: 'tool-call', id: 'query', name: 'find_worldbook', arguments: '{"query":"钟楼"}' } }
+  const finish = { type: 'finish', reason: { kind: 'tool-calls' },
+    replayState: { response: { provider: 'fixture' }, blocks: [{ hint: 'reasoning' }, { hint: 'text' }, { hint: 'tool' }, { hint: 'more-text' }] } }
   const ctx = {
     on(event, hook) { if (event === 'llm/stream') hooks.push(hook) },
     llm: { stream(request) {
       const downstream = async function * () {
         yield request
-        yield { type: 'finish', reason: { kind: 'stop' } }
+        yield thinking
+        yield { type: 'block-start', index: 3, blockType: 'text' }
+        yield toolStart
+        yield { type: 'text-delta', index: 3, text: '【本轮资料交接】' }
+        yield toolEnd
+        yield { type: 'block-end', index: 3, block: { type: 'text', text: '【本轮资料交接】' } }
+        yield { type: 'block-end', index: 8, block: { type: 'text', text: '结束。' } }
+        yield finish
       }
       const dispatch = index => hooks[index]?.(request, () => dispatch(index + 1)) ?? downstream()
       return dispatch(0)
@@ -169,9 +181,12 @@ test('白手套的共享历史复用前台投影，跳过通用后台请求改�
     foregroundStrategies: { projectRequest: () => assert.fail('共享历史不进入通用请求改写'), completeRequest() {} }
   })
   const task = { id: 'task', role: 'user', content: [{ type: 'text', text: '查资料。' }] }
-  const [request] = await Array.fromAsync(ctx.llm.stream({ sessionId: 'white-glove', provider: 'deepseek-official', messages: [task] }))
+  const [request, ...chunks] = await Array.fromAsync(ctx.llm.stream({ sessionId: 'white-glove', provider: 'deepseek-official', messages: [task] }))
   assert.equal(request.system, context.system)
   assert.deepEqual(request.messages, [...context.messages, task])
+  assert.deepEqual(chunks, [thinking, toolStart, toolEnd, {
+    ...finish, replayState: { ...finish.replayState, blocks: [{ hint: 'reasoning' }, { hint: 'tool' }] }
+  }])
 })
 
 test('两边的实际写作请求过滤宿主提醒及其内容，保留相邻正文和资料', () => {
