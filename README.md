@@ -17,7 +17,7 @@ git -C /path/to/dsh-tavern apply /path/to/dsh-tavern-pure-writer/compat/tavern-h
 
 将仓库克隆到所用 Tavern 的持久数据目录 `plugins/dsh-tavern-pure-writer/` 下，或将插件包解压到这个位置。CLI 版默认的目标目录是 `~/.dsh-tavern/profile-data/tavern/data/plugins/dsh-tavern-pure-writer/`。重启宿主，在「设置 → DSH Tavern → 插件」确认插件已加载。停用插件后，下一轮恢复 Tavern 的原有生成流程。
 
-白手套 Agent 使用该局的后台模型，查完直接结束。程序只交接工具回执，并过滤白手套生成的回复文字。查询结果为空时，程序直接开始正文生成。
+白手套 Agent 使用该局的后台模型，查完直接结束。程序只交接工具回执，并过滤白手套生成的回复文字。有回执时，程序将原文保存在当轮玩家输入与正文之间，后续请求随会话历史读取。查询结果为空时，程序直接开始正文生成。
 
 ## 测试
 
