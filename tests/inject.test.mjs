@@ -84,12 +84,11 @@ test('自动交接按调用顺序保留完整回执和重复结果', async () =>
   const request = projectPureWritingRequest({
     system: '旧 Skill 目录', messages: [], toolChoice: 'any',
     tools: [{ name: 'skill' }, { name: 'grep_lorebook' }, { name: 'submit_story' }]
-  }, { context, injection: pureWritingInjection(frame, material), frame })
+  }, { context, injection: pureWritingInjection(frame, material) })
   assert.deepEqual(request.tools, [{ name: 'submit_story' }])
   assert.equal(request.toolChoice, undefined)
   assert.equal(request.system, context.system)
-  assert.deepEqual(request.messages[0], player)
-  assert.equal(request.messages.at(-2).content[0].text, material)
+  assert.deepEqual(request.messages, [player, pureWritingInjection(frame, material)])
 })
 
 test('白手套沿用前台的设定与原文历史，前轮的注入随原位置保存且重试不重复写入', async () => {
@@ -149,11 +148,10 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
   assert.match(preparation.system, /用第三人称写钟楼故事/)
   assert.equal(preparation.system, foreground.system)
   assert.deepEqual(preparation.messages.slice(0, -2), [checkpoint, ...history, player])
-  assert.equal(foreground.messages.at(-1).source.form, 'write')
-  assert.doesNotMatch(JSON.stringify(preparation.messages), /交付本轮完整正文/)
-  assert.deepEqual(foreground.messages.slice(0, -2), preparation.messages.slice(0, -2))
+  assert.doesNotMatch(JSON.stringify({ preparation, foreground }), /交付本轮完整正文/)
+  assert.deepEqual(foreground.messages.slice(0, -1), preparation.messages.slice(0, -2))
   assert.deepEqual(preparation.messages.slice(-2), [task, result])
-  const injection = foreground.messages.at(-2)
+  const injection = foreground.messages.at(-1)
   assert.equal(injection.content[0].text, result.content[0].text)
   assert.deepEqual(persisted, [injection])
 
@@ -168,7 +166,8 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
   const nextForeground = await strategy.prepareWritingRequest({ ...nativeRequest, messages: nextHistory })
   assert.equal(passes, 2)
   assert.deepEqual(shared.messages, nextHistory)
-  assert.deepEqual(nextForeground.messages.slice(0, -1), nextHistory)
+  assert.deepEqual(nextForeground.messages, nextHistory)
+  assert.deepEqual(nextForeground.messages.slice(0, foreground.messages.length), foreground.messages)
   assert.deepEqual(nextForeground.messages.filter(message => message.source?.form === 'inject'), [injection])
   assert.deepEqual(persisted, [injection])
 })
@@ -227,11 +226,11 @@ test('两边的实际写作请求过滤宿主提醒及其内容，保留相邻�
   const preparation = projectWritingPreparationRequest({ system: reminder, messages: [
     typed('runtime-context', reminder), typed('skill-invocation', 'skill instructions'), task
   ] }, context)
-  const foreground = projectPureWritingRequest({ tools: [] }, { context, injection: pureWritingInjection(frame, reminder + '钟楼侧门开着。'), frame })
+  const foreground = projectPureWritingRequest({ tools: [] }, { context, injection: pureWritingInjection(frame, reminder + '钟楼侧门开着。') })
   assert.equal(preparation.system, '前台写作设定。')
   assert.deepEqual(preparation.messages, [...context.messages, task])
   assert.deepEqual(context.messages.slice(0, 2), [{ ...body, id: undefined }, player])
-  assert.equal(foreground.messages.at(-2).content[0].text, '钟楼侧门开着。')
+  assert.equal(foreground.messages.at(-1).content[0].text, '钟楼侧门开着。')
   assert.doesNotMatch(JSON.stringify({ preparation, foreground }), /system-reminder|working directory|reusable set|skill instructions/)
 })
 
