@@ -10,9 +10,12 @@ const domain = module => import(pathToFileURL(resolve(host, 'tavern-plugin/lib/d
 const { createWritingPreparation } = await domain('writing-preparation.js')
 const { createWritingPreparationSources } = await domain('writing-preparation-sources.js')
 const { createPluginTaskExecution } = await domain('plugin-task-execution.js')
-const { projectPureWritingRequest } = await domain('pure-writing-request.js')
+const { createNativePlayOrchestrationStrategy } = await domain('foreground-orchestration-strategies.js')
+const { projectPureWritingRequest, projectWritingPreparationRequest, pureWritingContext } = await domain('pure-writing-request.js')
 const frame = { frameId: 'frame:writing', turn: 3, contributions: [], source: {} }
-const input = { gameId: 'game', frame }
+const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '去钟楼' }] }
+const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
+const input = { gameId: 'game', frame, context }
 
 function createFixture(readers, runTask) {
   const execution = createPluginTaskExecution({
@@ -24,10 +27,10 @@ function createFixture(readers, runTask) {
   })
   const preparation = createWritingPreparation({
     allowed: async () => true,
-    readSources: () => ({ input: () => ({ input: '去钟楼', recent: [] }), listSkills: () => [{ name: 'short' }], ...readers }),
-    runAgent: (owner, task, onToolResult) => execution.runAgent(owner, task, { writingPreparation: true, onToolResult })
+    readSources: () => ({ listSkills: () => [{ name: 'short' }], ...readers }),
+    runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
-  apply({ tavern: { capabilities: { writingPreparation: 4 }, writingPreparation: value => preparation.register('pure-writer', value) } })
+  apply({ tavern: { capabilities: { writingPreparation: 5 }, writingPreparation: value => preparation.register('pure-writer', value) } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), input)
 }
 
@@ -45,7 +48,9 @@ test('inject 按调用顺序交付原样回执，保留完整段落与重复结�
   }
   let outputs
   const prepare = createFixture(readers, async task => {
-    assert.match(task.system, /你是白手套 Agent/)
+    assert.match(task.prompt, /你是白手套 Agent/)
+    assert.match(task.prompt, /可用写作指引\nshort$/)
+    assert.deepEqual(task.writingPreparation, context)
     const tools = Object.fromEntries(task.tools.map(tool => [tool.name, args => task.call(tool.name, args)]))
     const schema = task.tools.find(tool => tool.name === 'inject').parameters
     assert.deepEqual(schema, { type: 'object', properties: {}, required: [], additionalProperties: false })
@@ -81,16 +86,59 @@ test('inject 按调用顺序交付原样回执，保留完整段落与重复结�
   assert.match(material, /钟楼藏在北岸。钥匙留在桌上。/)
   assert.doesNotMatch(material, /launch\.sh|npm install|\/tmp\/|references\/|[{}]|story\.py|读取失败|config\/|My Documents|" "/)
 
-  const user = { id: 'player', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '去钟楼' }] }
   const request = projectPureWritingRequest({
-    system: '旧 Skill 目录', messages: [user], toolChoice: 'any',
+    system: '旧 Skill 目录', messages: [], toolChoice: 'any',
     tools: [{ name: 'skill' }, { name: 'grep_lorebook' }, { name: 'submit_story' }]
-  }, { system: '写正文', material, frame })
+  }, { context, material, frame })
   assert.deepEqual(request.tools, [{ name: 'submit_story' }])
   assert.equal(request.toolChoice, undefined)
-  assert.equal(request.system, '写正文')
-  assert.equal(request.messages[0].content[0].text, material)
-  assert.equal(request.messages[1], user)
+  assert.equal(request.system, context.system)
+  assert.deepEqual(request.messages[0], player)
+  assert.equal(request.messages.at(-1).content[0].text, material)
+})
+
+test('白手套沿用前台实际发出的设定、原文历史和本轮输入，工具过程排在后面', async () => {
+  const longStory = '风从钟楼窗下吹过。'.repeat(200)
+  const history = Array.from({ length: 10 }, (_, index) => ({
+    id: `story-${index}`, role: 'assistant', source: { kind: 'model', provider: 'fixture', model: 'writer' },
+    content: [{ type: 'text', text: index === 1 ? longStory : `第 ${index} 段正文。` }]
+  }))
+  const task = { id: 'task', role: 'user', content: [{ type: 'text', text: '查写作资料。' }] }
+  const result = { id: 'result', role: 'tool', content: [{ type: 'text', text: '钟楼侧门开着。' }] }
+  let shared, passes = 0
+  const strategy = createNativePlayOrchestrationStrategy({
+    modeFor: async () => 'story',
+    resolvePreset: async () => null,
+    prepareTurn: async () => ({ frame: { ...frame, userInput: { sourceText: '去钟楼' }, source: { card: { systemPromptText: '用第三人称写钟楼故事。' } } } }),
+    recordFrame: () => {},
+    writingPreparation: {
+      forGame: async () => ({}),
+      prepare: async (_entry, { context }) => {
+        shared = context
+        passes++
+        return result.content[0].text
+      }
+    }
+  })
+  const decision = await strategy.prepareStep({
+    sessionId: 'game',
+    payload: { agent: { session: {} }, turn: 3, step: 1, messages: [player] },
+    decision: { messages: [player] }
+  })
+  assert.equal(passes, 0)
+  const nativeRequest = { sessionId: 'game', messages: [...history, ...decision.messages], tools: [{ name: 'submit_story' }] }
+  const foreground = await strategy.prepareWritingRequest(nativeRequest)
+  assert.deepEqual(await strategy.prepareWritingRequest(nativeRequest), foreground)
+  assert.equal(passes, 1)
+  const preparation = projectWritingPreparationRequest({
+    system: '背景任务系统提示', messages: [{ role: 'system' }, task, result], tools: [{ name: 'find_worldbook' }]
+  }, shared)
+  assert.match(preparation.system, /用第三人称写钟楼故事/)
+  assert.equal(preparation.system, foreground.system)
+  assert.deepEqual(preparation.messages.slice(0, -2), [...history, player])
+  assert.deepEqual(foreground.messages.slice(0, -2), preparation.messages.slice(0, -2))
+  assert.deepEqual(preparation.messages.slice(-2), [task, result])
+  assert.equal(foreground.messages.at(-1).content[0].text, result.content[0].text)
 })
 
 test('空查询回执留在白手套的工具记录中，前台直接开始写作', async () => {

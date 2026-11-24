@@ -2,11 +2,11 @@
 
 `dsh-tavern-pure-writer` 是独立安装的 DSH Tavern 插件。它把查询和工具调用交给白手套 Agent，让前台 Agent 专注生成正文，只保留防截断用的 `submit_story`。
 
-白手套 Agent 按需读取 Skill 和 reference，查询世界书、记忆和变量。查询工具返回写作所需的自然语言段落，变量状态和变化用普通句子表达。白手套调用 `inject({})` 后，这些段落按工具调用顺序原样进入前台 Agent 的本轮上下文。查询过程中的回执状态可在白手套 Agent 的轨迹中查看。
+每轮先确定前台要使用的人物设定、写作要求、剧情历史和本轮玩家输入。白手套从同一份上下文出发，在末尾接到查询任务和 Skill 目录，再按需读取资料。查询工具返回自然语言段落，变量状态和变化用普通句子表达。白手套调用 `inject({})` 后，资料按调用顺序原样进入前台本轮上下文的末尾。查询回执状态可在白手套 Agent 的轨迹中查看。
 
 ## 宿主兼容性
 
-插件需要 `tavern.capabilities.writingPreparation === 4`。[宿主兼容补丁](compat/tavern-host.patch) 以 Tavern 提交 `3dd131c9e` 为基线，添加这个接口及对应的正文请求流程。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
+插件需要 `tavern.capabilities.writingPreparation === 5`。[宿主兼容补丁](compat/tavern-host.patch) 以 Tavern 提交 `3dd131c9e` 为基线，添加这个接口及对应的正文请求流程。将补丁应用到准备运行的 Tavern 源码副本，再用该副本安装或同步宿主。
 
 ```sh
 git -C /path/to/dsh-tavern apply --check /path/to/dsh-tavern-pure-writer/compat/tavern-host.patch

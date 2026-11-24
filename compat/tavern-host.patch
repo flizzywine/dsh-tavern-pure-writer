@@ -1,5 +1,5 @@
 diff --git a/tavern-plugin/lib/background-agent-sessions.js b/tavern-plugin/lib/background-agent-sessions.js
-index 2b9456082..534fe896a 100644
+index 2b9456082..af69032c4 100644
 --- a/tavern-plugin/lib/background-agent-sessions.js
 +++ b/tavern-plugin/lib/background-agent-sessions.js
 @@ -194,6 +194,7 @@ export function createBackgroundAgentSessions(options, task) {
@@ -10,26 +10,36 @@ index 2b9456082..534fe896a 100644
      if (input.task === 'plugin') return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '插件任务' + (input.pluginName ? '：' + String(input.pluginName).slice(0, 60) : '') })
      if (!persistent) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '候选研究' })
      return subagentDescriptor({
+@@ -368,6 +369,7 @@ export function createBackgroundAgentSessions(options, task) {
+       maxTokens,
+       operationId: str(input.operationId),
+       ...(input.contextPolicy ? { contextPolicy: input.contextPolicy } : {}),
++      ...(input.writingPreparation ? { writingPreparation: input.writingPreparation } : {}),
+       ...(input.frozenBackground ? { frozenBackground: { policy: input.frozenBackground.policy, historical: input.frozenBackground.historical, binding: input.frozenBackground.binding } } : {}),
+       task: str(input.task) || 'background',
+       // Dev diagnostics: the streaming director window this request stages (request log).
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-index 61d5af4e6..8e518662e 100644
+index 61d5af4e6..f1e0995b1 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 +++ b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,7 @@
  import { promptSection } from './prompt-section.js'
 -import { stableCardName, stableSectionBody } from './session-stable-prefix.js'
 +import { sessionStablePrefixSections, stableCardName, stableSectionBody } from './session-stable-prefix.js'
  import { createHash, randomBytes } from 'node:crypto'
++import { isDeepStrictEqual } from 'node:util'
  import { projectPlayerContent } from './player-input-content.js'
  import { resolveRuntimePresetMacros } from './runtime-presets.js'
-@@ -24,6 +24,7 @@ import { isProducerSource, isSystemPromptSource } from './message-source.js'
+ import { projectRuntimePresetRequest } from './runtime-preset-lifecycle.js'
+@@ -24,6 +25,7 @@ import { isProducerSource, isSystemPromptSource } from './message-source.js'
  import { virtualWorldbookPromptText } from './worldbook-virtual-surface.js'
  import { frameUserInput } from './agent-input-frame.js'
  import { hasProviderContent } from './provider-message-content.js'
-+import { projectPureWritingRequest, pureWritingFixedSections, pureWritingSystem, pureWritingTools, PURE_WRITING_REQUEST, writingConversation } from './pure-writing-request.js'
++import { projectPureWritingRequest, pureWritingContext, pureWritingFixedSections, pureWritingSystem, pureWritingTools, PURE_WRITING_REQUEST } from './pure-writing-request.js'
  
  const CARD_REFERENCE_SECTIONS = new Set(['tavern:character-card', 'tavern:card-system-prompt', 'tavern:constant-worldbook'])
  const CARD_PERSONA_SCOPE = '起始任务和 Skill 规定任务步骤、交付物与必要格式。人物卡的设定与提示词用于理解和编辑目标。向用户提问、介绍选项和汇报时，始终沿用以下身份、称呼和语气。回复语言优先遵循用户明确要求，其次沿用以下性格的语言约定。'
-@@ -333,16 +334,41 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -333,16 +335,36 @@ export function createNativePlayOrchestrationStrategy(options) {
      const worldbookSection = pending && pending.agent === payload.agent ? pending.section : undefined
      if (worldbookSection) pendingWorldbookSections.delete(payload.signal)
      const mode = await options.modeFor(sessionId)
@@ -62,13 +72,8 @@ index 61d5af4e6..8e518662e 100644
 +        ...presetFrontSections(snapshot),
 +        ...pureWritingFixedSections(sessionStablePrefixSections(payload.agent.session))
 +      ]
-+      const material = await options.writingPreparation.prepare(pureWriter, {
-+        gameId: sessionId, frame, chat: input.chat, signal: payload.signal,
-+        messages: writingConversation(projectRegenerationRequestMessages(agentMessages))
-+      })
 +      const system = pureWritingSystem(fixed, frame, snapshot?.back?.entries)
-+      stagedRequests.set(sessionId, { pureWriter, frame, material, system })
-+      options.recordFrame(sessionId, frame, { appended: Boolean(material), reason: PURE_WRITING_REQUEST, frameId: frame.frameId })
++      stagedRequests.set(sessionId, { pureWriter, frame, system, chat: input.chat })
 +      return { kind: 'enter', messages: agentMessages, startsRequestSeries: true }
 +    }
 +    if (play) {
@@ -76,7 +81,7 @@ index 61d5af4e6..8e518662e 100644
          await options.synchronizeTail({ sessionId, chat: input.chat, payload })
        }
        // Persist/migrate the fixed system snapshot before native request assembly.
-@@ -375,11 +401,10 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -375,11 +397,10 @@ export function createNativePlayOrchestrationStrategy(options) {
          historyLayout: typeof options.historyLayout === 'function' ? String(await options.historyLayout() || 'story') : 'story'
        })
      }
@@ -91,7 +96,7 @@ index 61d5af4e6..8e518662e 100644
          const source = prepared.frame.source
          const worldbookPrefix = source?.regenerationMaterials?.worldbookPrefix
          if (worldbookSection && !input.chat?.regenInProgress && source?.worldBook?.virtualWorldbook && typeof worldbookPrefix === 'string') {
-@@ -393,7 +418,7 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -393,7 +414,7 @@ export function createNativePlayOrchestrationStrategy(options) {
          agentMessages = agentMessages.concat([snapshotMessage(prepared.text)])
        }
      }
@@ -100,18 +105,43 @@ index 61d5af4e6..8e518662e 100644
      // Models that update the system prompt in history would otherwise append the
      // new prompt after the old one, leaving a switched-out preset at the head.
      // A new request series makes DSH replace the head instead. Unknown history
-@@ -408,6 +433,10 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -404,10 +425,35 @@ export function createNativePlayOrchestrationStrategy(options) {
+     return { kind: 'enter', messages: agentMessages, ...(switched ? { startsRequestSeries: true } : {}) }
+   }
+
++  async function prepareWritingRequest(request) {
++    const sessionId = str(request.sessionId)
++    const staged = stagedRequests.get(sessionId)
++    if (!staged?.pureWriter) throw new Error('本轮写作上下文已失效')
++    const { frame } = staged
++    const context = pureWritingContext(staged.system, projectLegacyOpeningSources(projectRegenerationRequestMessages(request.messages)))
++    if (!isDeepStrictEqual(staged.preparation?.context, context)) {
++      const material = options.writingPreparation.prepare(staged.pureWriter, {
++        gameId: sessionId, frame, chat: staged.chat, signal: request.signal, context
++      })
++      staged.preparation = { context, material }
++    }
++    const preparation = staged.preparation
++    try {
++      const material = await preparation.material
++      options.recordFrame(sessionId, frame, { appended: Boolean(material), reason: PURE_WRITING_REQUEST, frameId: frame.frameId })
++      const projected = projectPureWritingRequest(request, { context: preparation.context, material, frame })
++      return markRequestHandled(markRequestHandled(projected, PURE_WRITING_REQUEST), PROJECTED)
++    } catch (error) {
++      if (staged.preparation === preparation) staged.preparation = undefined
++      throw error
++    }
++  }
++
+   function projectRequest(optionsValue) {
      const sessionId = str(optionsValue && optionsValue.sessionId)
      const staged = stagedRequests.get(sessionId)
      if (optionsValue === null || typeof optionsValue !== 'object' || optionsValue.purpose !== undefined || requestHandledBy(optionsValue, PROJECTED)) return null
-+    if (staged?.pureWriter) {
-+      const messages = projectLegacyOpeningSources(projectRegenerationRequestMessages(optionsValue.messages))
-+      return markRequestHandled(markRequestHandled(projectPureWritingRequest({ ...optionsValue, messages }, staged), PURE_WRITING_REQUEST), PROJECTED)
-+    }
++    if (staged?.pureWriter) return null
      // Empty surface tombstones preserve append-only history, but are not messages
      // for the provider. Remove them before choosing a regeneration target.
      const visibleMessages = (optionsValue.messages || []).filter(hasProviderContent)
-@@ -535,6 +564,7 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -535,6 +581,7 @@ export function createNativePlayOrchestrationStrategy(options) {
  
    function completeRequest(optionsValue, completed) {
      if (!completed || !requestHandledBy(optionsValue, PROJECTED)) return false
@@ -119,7 +149,7 @@ index 61d5af4e6..8e518662e 100644
      stagedRequests.delete(str(optionsValue && optionsValue.sessionId))
      return true
    }
-@@ -545,6 +575,12 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -545,6 +592,12 @@ export function createNativePlayOrchestrationStrategy(options) {
    }
  
    async function assembleSystemPrompt(assembly, input) {
@@ -132,22 +162,22 @@ index 61d5af4e6..8e518662e 100644
      const mode = await options.modeFor(input.sessionId)
      const visible = new Set(await options.visibleTools(input.sessionId))
      const playMode = mode === 'story' || mode === 'script'
-@@ -649,7 +685,8 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -649,7 +702,8 @@ export function createNativePlayOrchestrationStrategy(options) {
      return assembly
    }
  
 -  return Object.freeze({ kind: 'native-play', prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection })
 +  const pureWritingTurn = sessionId => Boolean(stagedRequests.get(sessionId)?.pureWriter)
-+  return Object.freeze({ kind: 'native-play', prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection, pureWritingTurn })
++  return Object.freeze({ kind: 'native-play', prepareStep, prepareWritingRequest, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection, pureWritingTurn })
  }
  
  export function createForegroundOrchestrationStrategies(options) {
-@@ -684,5 +721,5 @@ export function createForegroundOrchestrationStrategies(options) {
+@@ -684,5 +738,5 @@ export function createForegroundOrchestrationStrategies(options) {
      return await nativePlay.assembleSystemPrompt(assembly, input)
    }
  
 -  return Object.freeze({ prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection: nativePlay.stageWorldbookSection })
-+  return Object.freeze({ prepareStep, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection: nativePlay.stageWorldbookSection, pureWritingTurn: nativePlay.pureWritingTurn })
++  return Object.freeze({ prepareStep, prepareWritingRequest: nativePlay.prepareWritingRequest, projectRequest, completeRequest, clearRequestState, assembleSystemPrompt, stageWorldbookSection: nativePlay.stageWorldbookSection, pureWritingTurn: nativePlay.pureWritingTurn })
  }
 diff --git a/tavern-plugin/lib/domain/foreground-variable-changes.js b/tavern-plugin/lib/domain/foreground-variable-changes.js
 index dd054b17b..940500da3 100644
@@ -222,7 +252,7 @@ index 3ae0ecd9d..d0c82da98 100644
        const selected = { ...configured, ...await providers.controlRoute?.(gameId) }
        if (!selected.mode?.startsWith('plugin-')) return null
 diff --git a/tavern-plugin/lib/domain/plugin-task-execution.js b/tavern-plugin/lib/domain/plugin-task-execution.js
-index 3e45bef52..16dfa015f 100644
+index 3e45bef52..f7ff36cf6 100644
 --- a/tavern-plugin/lib/domain/plugin-task-execution.js
 +++ b/tavern-plugin/lib/domain/plugin-task-execution.js
 @@ -63,7 +63,7 @@ export function createPluginTaskExecution({ runTask, currentKey, readLatestSettl
@@ -230,7 +260,7 @@ index 3e45bef52..16dfa015f 100644
    }
  
 -  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}) {
-+  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}, { writingPreparation = false, onToolResult } = {}) {
++  async function runTaskAs(owner, { gameId, prompt, tools = [], signal, member, selection, system, temperature, maxToolCalls, stopToolsWhen, acceptWithoutText } = {}, { writingPreparation, onToolResult } = {}) {
      const game = await requireGame(gameId)
      // A member of this plugin only (tavern.member): its resident Session, its queue.
      const memberId = member === undefined ? '' : pluginMemberId(owner, String(member))
@@ -273,19 +303,20 @@ index 3e45bef52..16dfa015f 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..e9dfec802
+index 000000000..b88977f7d
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,77 @@
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
 +import { STORY_SUBMIT_TOOL_NAME } from './story-tool-submission.js'
 +
 +export const PURE_WRITING_REQUEST = 'pure-writing'
++export const WRITING_PREPARATION_REQUEST = 'writing-preparation'
 +
 +const KEEP_FIXED_SECTIONS = new Set(['tavern:user-preference', 'tavern:character-card'])
 +const STORY_SECTIONS = new Set(['base', 'card', 'card-instruction', 'script', 'guide'])
-+const OUTPUT = '只写本轮的完整正文。可直接输出正文，或调用 submit_story 一次性提交完整正文。不要输出资料清单、工具过程或变量更新。'
++const OUTPUT = '只交付本轮完整正文。可直接输出正文，也可使用提交正文工具一次性交付。'
 +
 +export function pureWritingTools(tools) {
 +  return (tools || []).filter(tool => tool?.name === STORY_SUBMIT_TOOL_NAME)
@@ -297,7 +328,7 @@ index 000000000..e9dfec802
 +
 +/** Copy only the actual transcript. Tool chains, old context and provider
 + * replay metadata are irrelevant once the writing request has its own prefix. */
-+export function writingConversation(messages) {
++function writingConversation(messages) {
 +  return (messages || []).flatMap(message => {
 +    if (message?.role === 'user') {
 +      if (!inputKind(message)) return []
@@ -320,15 +351,30 @@ index 000000000..e9dfec802
 +    const source = item.source
 +    if ((source.stage === 'context-plan' && STORY_SECTIONS.has(source.sectionKind)) || source.stage === 'runtime-preset') sections.push(item.text)
 +  }
-+  return [...sections, ...back.map(entry => entry.content), OUTPUT].filter(Boolean).join('\n\n')
++  return [...sections, ...back.map(entry => entry.content)].filter(Boolean).join('\n\n')
 +}
 +
-+export function projectPureWritingRequest(request, { system, material, frame }) {
-+  const conversation = writingConversation(request.messages)
++export function pureWritingContext(system, messages) {
++  const conversation = writingConversation(messages)
 +  const inputAt = conversation.findLastIndex(message => message.role === 'user')
 +  if (inputAt < 0) throw new Error('纯净写作找不到本轮玩家输入')
-+  const messages = conversation.slice(Math.max(0, inputAt - 12), inputAt + 1)
-+  if (material) messages.splice(messages.length - 1, 0, {
++  return { system, messages: structuredClone(conversation.slice(Math.max(0, inputAt - 12), inputAt + 1)) }
++}
++
++export function projectWritingPreparationRequest(request, context) {
++  return { ...request, system: context.system,
++    messages: [...structuredClone(context.messages), ...request.messages.filter(message => message.role !== 'system')] }
++}
++
++export function projectPureWritingRequest(request, { context, material, frame }) {
++  const messages = structuredClone(context.messages)
++  messages.push({
++    id: frame.frameId + ':write',
++    role: 'user',
++    content: [{ type: 'text', text: OUTPUT }],
++    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' }
++  })
++  if (material) messages.push({
 +    id: frame.frameId + ':inject',
 +    role: 'user',
 +    content: [{ type: 'text', text: material }],
@@ -336,7 +382,7 @@ index 000000000..e9dfec802
 +  })
 +  // Existing host protocol choices refer to the tool list that was replaced.
 +  const { toolChoice, ...base } = request
-+  return { ...base, system, messages, tools: pureWritingTools(request.tools) }
++  return { ...base, system: context.system, messages, tools: pureWritingTools(request.tools) }
 +}
 diff --git a/tavern-plugin/lib/domain/story-tool-submission.js b/tavern-plugin/lib/domain/story-tool-submission.js
 index fe0ae19bc..10f4c6f58 100644
@@ -425,11 +471,10 @@ index 000000000..690f022cc
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation-sources.js b/tavern-plugin/lib/domain/writing-preparation-sources.js
 new file mode 100644
-index 000000000..f019cba44
+index 000000000..2a9decb03
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation-sources.js
-@@ -0,0 +1,120 @@
-+import { frameUserInput } from './agent-input-frame.js'
+@@ -0,0 +1,110 @@
 +import { lastRoundVariableValues } from './foreground-variable-changes.js'
 +import { canonicalTavernSkillName } from './tavern-skills.js'
 +import { classifyWorldbookEntry } from './worldbook-entry-classification.js'
@@ -438,7 +483,6 @@ index 000000000..f019cba44
 +
 +const BROWSE_LIMIT = 6
 +
-+const plainText = message => (message?.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n')
 +const normalize = value => String(value ?? '').toLocaleLowerCase()
 +const wordsOf = query => normalize(query).match(/[\p{L}\p{N}_-]+/gu) || []
 +
@@ -476,7 +520,7 @@ index 000000000..f019cba44
 +}
 +
 +export function createWritingPreparationSources({ tavernSkills, chatForSession, worldbookForChat, historyRecall }) {
-+  return ({ gameId, frame, chat, messages, signal }) => {
++  return ({ gameId, frame, chat, signal }) => {
 +    let catalog, history, worldbook
 +    const disabled = new Set((chat?.disabledWritingSkills || []).map(canonicalTavernSkillName))
 +    const applicableSkills = () => catalog ??= tavernSkills.list().then(rows => rows.filter(skill =>
@@ -493,14 +537,6 @@ index 000000000..f019cba44
 +    const context = frame.source?.regenerationMaterials
 +    const memoryScope = {}
 +    return {
-+      async input() {
-+        const input = frameUserInput(frame).projectedText.slice(-6000)
-+        const visible = messages.slice(0, -1).slice(-6)
-+        const recent = visible.length ? visible.map(message => ({ role: message.role, text: plainText(message).slice(-1200) }))
-+          : (await readHistory()).messages.filter(row => row?.role === 'user' || row?.role === 'assistant').slice(-6)
-+            .map(row => ({ role: row.role, text: String(row.text ?? '').slice(-1200) }))
-+        return { input, recent }
-+      },
 +      listSkills: async () => {
 +        signal.throwIfAborted()
 +        return (await applicableSkills()).map(({ name, description }) => ({ name, description })).slice(0, 100)
@@ -551,10 +587,10 @@ index 000000000..f019cba44
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..b24fbc1af
+index 000000000..fdfec5faf
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,99 @@
 +import { untilAborted } from './plugin-callback.js'
 +import { writingMaterialText } from './writing-material-text.js'
 +
@@ -593,12 +629,12 @@ index 000000000..b24fbc1af
 +    return applicable[0] ?? null
 +  }
 +
-+  async function prepare(entry, { gameId, frame, chat, messages, signal }) {
++  async function prepare(entry, { gameId, frame, chat, context, signal }) {
 +    const done = new AbortController()
 +    const requestSignal = AbortSignal.any([done.signal, entry.lifetime.signal, AbortSignal.timeout(TIMEOUT_MS), ...(signal ? [signal] : [])])
 +    const toolResults = []
 +    let submitted
-+    const sourceReaders = readSources({ gameId, frame, chat, messages, signal: requestSignal })
++    const sourceReaders = readSources({ gameId, frame, chat, signal: requestSignal })
 +
 +    async function read(kind, args) {
 +      requestSignal.throwIfAborted()
@@ -625,9 +661,8 @@ index 000000000..b24fbc1af
 +
 +    try {
 +      requestSignal.throwIfAborted()
-+      const input = await untilAborted(Promise.resolve().then(sourceReaders.input), requestSignal)
 +      await untilAborted(Promise.resolve().then(() => entry.prepare({
-+        gameId, turn: frame.turn, ...input, signal: requestSignal,
++        gameId, turn: frame.turn, signal: requestSignal,
 +        listSkills: () => {
 +          requestSignal.throwIfAborted()
 +          return sourceReaders.listSkills()
@@ -639,7 +674,7 @@ index 000000000..b24fbc1af
 +        inject,
 +        runAgent: task => {
 +          requestSignal.throwIfAborted()
-+          return runAgent(entry.owner, { ...task, gameId, signal: requestSignal }, (name, result) => {
++          return runAgent(entry.owner, { ...task, gameId, signal: requestSignal }, context, (name, result) => {
 +            // Keep call order for concurrent tools and reuse the exact model-facing receipt.
 +            if (!submitted && name !== 'inject') toolResults.push(result)
 +          })
@@ -656,28 +691,43 @@ index 000000000..b24fbc1af
 +  return { register, forGame, prepare }
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
-index 442447f8f..bef908803 100644
+index 442447f8f..897c386e1 100644
 --- a/tavern-plugin/lib/hooks/model-stream.js
 +++ b/tavern-plugin/lib/hooks/model-stream.js
 @@ -14,6 +14,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
  import { STORY_CONTEXT_TOOL_NAME, STORY_SUBMIT_TOOL_NAME } from '../domain/story-tool-submission.js'
  import { isAutoToolOnlyModel, runWithToolProtocolDirective } from '../domain/tool-protocol-enforcement.js'
  import { createToolReplyStreamTracker } from '../domain/tool-reply-stream-parser.js'
-+import { PURE_WRITING_REQUEST } from '../domain/pure-writing-request.js'
++import { projectWritingPreparationRequest, PURE_WRITING_REQUEST, WRITING_PREPARATION_REQUEST } from '../domain/pure-writing-request.js'
  
  // Prompt prose source. Keys are stable; interpolation arguments are data.
  export const PROMPT_PROSE = Object.freeze({
-@@ -161,7 +162,8 @@ export function registerModelStreamHooks({
-     const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
+@@ -156,12 +157,22 @@ export function registerModelStreamHooks({
+         source: { kind: 'model', provider: str(options.provider), model: str(options.model) }
+       }))
+     }
++    const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
++    const writingContext = backgroundContext?.writingPreparation
++    if (options.purpose === undefined && writingContext && !requestHandledBy(options, WRITING_PREPARATION_REQUEST)) {
++      return ctx.llm.stream(markRequestHandled(projectWritingPreparationRequest(options, writingContext), WRITING_PREPARATION_REQUEST))
++    }
++    if (options.purpose === undefined && !requestHandledBy(options, PURE_WRITING_REQUEST) && foregroundStrategies.pureWritingTurn?.(sessionId)) {
++      return (async function * () {
++        yield * ctx.llm.stream(await foregroundStrategies.prepareWritingRequest(options))
++      })()
++    }
+     const projectedRequest = (requestHandledBy(options, 'full-template') || importContextPreparation.isPrepared(options)) ? null : foregroundStrategies.projectRequest(options, coordinates)
+     if (projectedRequest !== null) return ctx.llm.stream(projectedRequest)
+-    const backgroundContext = backgroundAgentRunner.requestContext(sessionId)
      const ownerSessionId = backgroundContext ? backgroundContext.parentSessionId : sessionId
      return (async function * () {
 -      if (!backgroundContext && options.purpose === undefined && pluginBodyGeneration) {
-+      const pureWriting = requestHandledBy(options, PURE_WRITING_REQUEST)
++      const pureWriting = requestHandledBy(options, PURE_WRITING_REQUEST) || requestHandledBy(options, WRITING_PREPARATION_REQUEST)
 +      if (!pureWriting && !backgroundContext && options.purpose === undefined && pluginBodyGeneration) {
          const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
          const direct = await pluginBodyGeneration.direct(session, options.signal)
          if (direct) { yield * direct; return }
-@@ -169,12 +171,12 @@ export function registerModelStreamHooks({
+@@ -169,12 +180,12 @@ export function registerModelStreamHooks({
        // a director already owns frozen, projected sources.
        const director = backgroundContext?.task === 'stage-director'
        if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -730,7 +780,7 @@ index 422058325..9751c658e 100644
      const nativeWorldbook = needWorldbook && chat.worldbookStrategy === 'native-skills'
      const needPlugins = Boolean(pluginPromptSections && chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(mode))
 diff --git a/tavern-plugin/lib/index.js b/tavern-plugin/lib/index.js
-index a607f42ee..3bc0a925b 100644
+index a607f42ee..65763cf95 100644
 --- a/tavern-plugin/lib/index.js
 +++ b/tavern-plugin/lib/index.js
 @@ -41,7 +41,7 @@ import { registerRequestHooks } from './hooks/request.js'
@@ -750,7 +800,7 @@ index a607f42ee..3bc0a925b 100644
  import { createSceneWorldbooks } from './domain/scene-worldbook.js'
  import { createSessionStablePrefixStorage, ensureSessionStablePrefix, readSessionStablePrefix } from './domain/session-stable-prefix.js'
  import { waitForWritableSession } from './domain/agent-readiness.js'
-@@ -3375,7 +3376,7 @@ export async function apply(ctx) {
+@@ -3375,17 +3376,19 @@ export async function apply(ctx) {
    // A plugin's one-off task: a fresh background Session, never the resident one settlement uses.
    // A member with a prefix of its own (`system`): that prefix, and the prompt as the task's one
    // message; the plugin hands it whatever story it needs.
@@ -759,7 +809,12 @@ index a607f42ee..3bc0a925b 100644
      const selection = customSelection || backgroundModelSelection(await backgroundConfigForSession(gameId))
      if (!selection) throw new Error('这局没有可用的后台模型')
      const chat = await storyContext({ sessionId: gameId })
-@@ -3386,6 +3387,7 @@ export async function apply(ctx) {
+     const recent = (chat?.messages || []).filter(message => message && !message.greeting && ['user', 'assistant'].includes(message.role)).slice(-2)
+       .map(message => ({ role: message.role, content: [{ type: 'text', text: pluginSource(message).slice(-2400) }] }))
+     // With a plugin member, its resident Session (one per game) instead of a fresh one.
+-    const own = system !== undefined ? { ownPrefix: true, system, taskText: prompt, messages: [] } : { system: prompt, messages: recent }
++    const ownSystem = writingPreparation?.system ?? system
++    const own = ownSystem !== undefined ? { ownPrefix: true, system: ownSystem, taskText: prompt, messages: [] } : { system: prompt, messages: recent }
      return await backgroundAgentRunner.run({
        task: 'plugin',
        pluginName: id ? owner + '/' + id : owner,
@@ -767,7 +822,7 @@ index a607f42ee..3bc0a925b 100644
        member,
        persistent: Boolean(member),
        sessionId: gameId,
-@@ -3416,6 +3418,13 @@ export async function apply(ctx) {
+@@ -3416,6 +3419,13 @@ export async function apply(ctx) {
    const figurePictures = createFigurePictures(() => ctx.get('assetLibrary'))
    pluginApi = createTavernPluginApi({
      ctx,get modHost() {return ctx.get('tavernManagedModules')},
@@ -781,7 +836,7 @@ index a607f42ee..3bc0a925b 100644
      replyStreamRewriters,
      logger: console,
      // The asset packs a card plays with: its own and the ones every card uses.
-@@ -3673,6 +3682,7 @@ export async function apply(ctx) {
+@@ -3673,6 +3683,7 @@ export async function apply(ctx) {
    })
    const pluginBodyGeneration = createPluginBodyGeneration({ chatForSession, routeChatForSession: sessionId => chatHeaderForSession(sessionId, ['mode', 'foregroundFrames', 'timeline']), readRevision: readChatRevision,
      updateChat, settings: readTavernSettings, providers: pluginApi.bodyGenerators,
@@ -789,7 +844,7 @@ index a607f42ee..3bc0a925b 100644
      isWorldbookPath: filePath => worldbookSkillProvider.ownsPath(filePath),
      isBackground: sessionId => backgroundAgentRunner.owns(sessionId),
      regenerateWithProvider: input => regenerateWithProvider(input) })
-@@ -4509,7 +4519,7 @@ export async function apply(ctx) {
+@@ -4509,7 +4520,7 @@ export async function apply(ctx) {
      prepareRegenerationFrameCache: async ({ chat, card, turn, userText, target, targetAssistantIndex }) => {
        if (!chat || !card || !['story', 'script'].includes(chat.mode || 'story')) return null
        const settings = await readTavernSettings()
@@ -798,7 +853,7 @@ index a607f42ee..3bc0a925b 100644
        const preset = await resolveChatRuntimePreset({ ...chat }, { preview: true })
        const worldBook = await playWorldBook(chat, card)
        const targetRow = targetAssistantIndex >= 0 ? chat.messages?.[targetAssistantIndex] : null
-@@ -5071,6 +5081,7 @@ export async function apply(ctx) {
+@@ -5071,6 +5082,7 @@ export async function apply(ctx) {
    const controlledToolNames = new Set([...modTools.map(tool => tool.name), 'style_reference_submit', STORY_SUBMIT_TOOL_NAME, STORY_CONTEXT_TOOL_NAME, STORY_GENERATE_TOOL_NAME, 'tavern_read_variables', ...WORLDBOOK_ACCESS_TOOLS, ...CARD_MEMORY_TOOLS, 'bash', 'pwsh', ...dshFileToolNames, 'skill', 'tavern_read_skill_reference', 'tavern_read_skill', 'web_search', 'web_fetch', 'tavern_save_skill', ...cordisToolNames, 'tavern_user_profile_read', 'tavern_user_profile_save', 'tavern_user_profile_confirm', 'tavern_read_card', 'tavern_read_card_raw', 'tavern_search_card', 'tavern_replace_card_text', 'tavern_mvu_overview', 'tavern_apply_mvu', 'tavern_read_play_chat', 'tavern_read_script', 'tavern_recall_history', 'worldbook_search', WORKBENCH_READ_LOREBOOK_TOOL, WORKBENCH_UPDATE_LOREBOOK_TOOL, 'tavern_read_preset', 'tavern_update_preset', 'tavern_read_regex_library', 'tavern_copy_card', 'tavern_set_card_cover', 'tavern_export_card_png', 'tavern_update_card', 'tavern_restore_card', 'tavern_validate_card', 'tavern_test_response'])
    const foregroundStrategies = createForegroundOrchestrationStrategies({
      nativePlay: {
@@ -806,7 +861,7 @@ index a607f42ee..3bc0a925b 100644
        // Input side: replay past bodies as calls of the submission tool.
        styleReferencePrompt: chat => foregroundStyleReferencePrompt(chat, runtimePrompt('style-reference-recall'), runtimePrompt('style-reference')),
        foregroundCandidatePrompt: async chat => chat?.backgroundTasks?.foregroundCandidates === true
-@@ -5209,6 +5220,7 @@ export async function apply(ctx) {
+@@ -5209,6 +5221,7 @@ export async function apply(ctx) {
      runtimePrompt,
      sessionStore,
      storyOutputToolCall: async () => (await readTavernSettings()).storyOutputToolCall,
@@ -814,7 +869,7 @@ index a607f42ee..3bc0a925b 100644
      turnOrchestrator,
      userMessageForTurn,
    })
-@@ -5222,7 +5234,8 @@ export async function apply(ctx) {
+@@ -5222,7 +5235,8 @@ export async function apply(ctx) {
        pluginGeneration: async sessionId => (await pluginBodyGeneration.route(sessionId)).mode?.startsWith('plugin-'),
        // Input-only requests still declare the tool for their replayed history;
        // accepting a real submission there is harmless.
@@ -825,7 +880,7 @@ index a607f42ee..3bc0a925b 100644
          return settings.storyInputToolCall === true || settings.storyOutputToolCall === true
        },
 diff --git a/tavern-plugin/lib/plugin-api.js b/tavern-plugin/lib/plugin-api.js
-index 14bdb2987..314aeea82 100644
+index 14bdb2987..fd907f9b2 100644
 --- a/tavern-plugin/lib/plugin-api.js
 +++ b/tavern-plugin/lib/plugin-api.js
 @@ -15,6 +15,7 @@ import path from 'node:path'
@@ -840,7 +895,7 @@ index 14bdb2987..314aeea82 100644
      return name
    }
    const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, guideSource: 1,
-+    ...(deps.writingSources ? { writingPreparation: 4 } : {}),
++    ...(deps.writingSources ? { writingPreparation: 5 } : {}),
      ...(deps.readTavernSettings && deps.updateTavernSettings ? { bodyGenerationDefaults: 1 } : {}),
      ...(deps.generationPresets ? { generationPresets: 1 } : {}),
      ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
@@ -857,7 +912,7 @@ index 14bdb2987..314aeea82 100644
 +      const scope = await accessScope(owner)
 +      return !scope || scope.cards.includes(await deps.cardPathOf?.(gameId))
 +    },
-+    runAgent: (owner, input, onToolResult) => taskExecution.runAgent(owner, input, { writingPreparation: true, onToolResult }),
++    runAgent: (owner, input, writingPreparation, onToolResult) => taskExecution.runAgent(owner, input, { writingPreparation, onToolResult }),
 +    readSources: deps.writingSources
 +  })
    const service = {
