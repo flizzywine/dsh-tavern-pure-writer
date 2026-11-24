@@ -30,8 +30,25 @@ index 8fb5366e3..e792c715b 100644
          const snapshot = typeof options.resolveRuntimePresetSnapshot === 'function'
            ? await options.resolveRuntimePresetSnapshot({
              sessionId: input.sessionId,
+diff --git a/tavern-plugin/lib/domain/compaction-checkpoint.js b/tavern-plugin/lib/domain/compaction-checkpoint.js
+index 13631f301..ac8a6c954 100644
+--- a/tavern-plugin/lib/domain/compaction-checkpoint.js
++++ b/tavern-plugin/lib/domain/compaction-checkpoint.js
+@@ -7,7 +7,11 @@ const COMPACTION_PLUGINS = new Set(['compact', 'dsh-compaction-basic'])
+ export const STRAY_CHECKPOINT_FORM = 'compaction-checkpoint-rewrite'
+
+ export function isCompactionCheckpoint(event) {
+-  const source = event?.type === 'user/message' ? event.data?.source : null
++  return event?.type === 'user/message' && isCompactionCheckpointMessage(event.data)
++}
++
++export function isCompactionCheckpointMessage(message) {
++  const source = message?.source
+   // DSH 0.2.1（会话格式 v4）把检查点的来源记为 { kind: 'compact-checkpoint' }，不再是插件来源。
+   // 认不出来时模板同步会把压缩摘要改写成玩家原文，而在压缩之外替换检查点的存档，
+   // DSH 重启后会拒绝加载（compaction checkpoint has no matching compaction/start）。
 diff --git a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
-index 61d5af4e6..f1e0995b1 100644
+index 61d5af4e6..5a2c8b4aa 100644
 --- a/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 +++ b/tavern-plugin/lib/domain/foreground-orchestration-strategies.js
 @@ -1,6 +1,7 @@
@@ -117,7 +134,7 @@ index 61d5af4e6..f1e0995b1 100644
      // Models that update the system prompt in history would otherwise append the
      // new prompt after the old one, leaving a switched-out preset at the head.
      // A new request series makes DSH replace the head instead. Unknown history
-@@ -404,10 +425,35 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -404,10 +425,36 @@ export function createNativePlayOrchestrationStrategy(options) {
      return { kind: 'enter', messages: agentMessages, ...(switched ? { startsRequestSeries: true } : {}) }
    }
 
@@ -126,7 +143,8 @@ index 61d5af4e6..f1e0995b1 100644
 +    const staged = stagedRequests.get(sessionId)
 +    if (!staged?.pureWriter) throw new Error('本轮写作上下文已失效')
 +    const { frame } = staged
-+    const context = pureWritingContext(staged.system, projectLegacyOpeningSources(projectRegenerationRequestMessages(request.messages)))
++    const messages = projectLegacyOpeningSources(projectRegenerationRequestMessages(request.messages))
++    const context = pureWritingContext(staged.system, messages, frame.frameId)
 +    if (!isDeepStrictEqual(staged.preparation?.context, context)) {
 +      const material = options.writingPreparation.prepare(staged.pureWriter, {
 +        gameId: sessionId, frame, chat: staged.chat, signal: request.signal, context
@@ -153,7 +171,7 @@ index 61d5af4e6..f1e0995b1 100644
      // Empty surface tombstones preserve append-only history, but are not messages
      // for the provider. Remove them before choosing a regeneration target.
      const visibleMessages = (optionsValue.messages || []).filter(hasProviderContent)
-@@ -535,6 +581,7 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -535,6 +582,7 @@ export function createNativePlayOrchestrationStrategy(options) {
  
    function completeRequest(optionsValue, completed) {
      if (!completed || !requestHandledBy(optionsValue, PROJECTED)) return false
@@ -161,7 +179,7 @@ index 61d5af4e6..f1e0995b1 100644
      stagedRequests.delete(str(optionsValue && optionsValue.sessionId))
      return true
    }
-@@ -545,6 +592,12 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -545,6 +593,12 @@ export function createNativePlayOrchestrationStrategy(options) {
    }
  
    async function assembleSystemPrompt(assembly, input) {
@@ -174,7 +192,7 @@ index 61d5af4e6..f1e0995b1 100644
      const mode = await options.modeFor(input.sessionId)
      const visible = new Set(await options.visibleTools(input.sessionId))
      const playMode = mode === 'story' || mode === 'script'
-@@ -649,7 +702,8 @@ export function createNativePlayOrchestrationStrategy(options) {
+@@ -649,7 +703,8 @@ export function createNativePlayOrchestrationStrategy(options) {
      return assembly
    }
  
@@ -184,7 +202,7 @@ index 61d5af4e6..f1e0995b1 100644
  }
  
  export function createForegroundOrchestrationStrategies(options) {
-@@ -684,5 +738,5 @@ export function createForegroundOrchestrationStrategies(options) {
+@@ -684,5 +739,5 @@ export function createForegroundOrchestrationStrategies(options) {
      return await nativePlay.assembleSystemPrompt(assembly, input)
    }
  
@@ -315,20 +333,22 @@ index 3e45bef52..f7ff36cf6 100644
          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
 diff --git a/tavern-plugin/lib/domain/pure-writing-request.js b/tavern-plugin/lib/domain/pure-writing-request.js
 new file mode 100644
-index 000000000..b88977f7d
+index 000000000..79b7d55b1
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/pure-writing-request.js
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,78 @@
++import { isCompactionCheckpointMessage } from './compaction-checkpoint.js'
 +import { inputKind } from './session-turn-input.js'
 +import { promptSection } from './prompt-section.js'
 +import { STORY_SUBMIT_TOOL_NAME } from './story-tool-submission.js'
++import { stripWritingSystemReminders, writingRequestMessages } from './writing-system-reminders.js'
 +
 +export const PURE_WRITING_REQUEST = 'pure-writing'
 +export const WRITING_PREPARATION_REQUEST = 'writing-preparation'
 +
 +const KEEP_FIXED_SECTIONS = new Set(['tavern:user-preference', 'tavern:character-card'])
 +const STORY_SECTIONS = new Set(['base', 'card', 'card-instruction', 'script', 'guide'])
-+const OUTPUT = '只交付本轮完整正文。可直接输出正文，也可使用提交正文工具一次性交付。'
++const OUTPUT = '前台 Agent 交付本轮完整正文。可直接输出正文，也可使用提交正文工具一次性交付。'
 +
 +export function pureWritingTools(tools) {
 +  return (tools || []).filter(tool => tool?.name === STORY_SUBMIT_TOOL_NAME)
@@ -338,17 +358,16 @@ index 000000000..b88977f7d
 +  return sections.filter(section => KEEP_FIXED_SECTIONS.has(section.name))
 +}
 +
-+/** Copy only the actual transcript. Tool chains, old context and provider
-+ * replay metadata are irrelevant once the writing request has its own prefix. */
++/** Keep the native story history, including prose carried over by compaction. */
 +function writingConversation(messages) {
 +  return (messages || []).flatMap(message => {
 +    if (message?.role === 'user') {
-+      if (!inputKind(message)) return []
++      if (!inputKind(message) && !isCompactionCheckpointMessage(message)) return []
 +      return message.content?.length ? [message] : []
 +    }
 +    if (message?.role !== 'assistant' || !(message.source?.kind === 'model' || !message.source)) return []
-+    const content = (message.content || []).filter(block => block.type === 'text' && block.text?.trim())
-+    if (!content.length) return []
++    const content = (message.content || []).filter(block => block.type === 'text')
++    if (!content.some(block => block.text?.trim())) return []
 +    const { id, role } = message
 +    const source = message.source && { kind: 'model', provider: message.source.provider, model: message.source.model }
 +    return [{ id, role, ...(source ? { source } : {}), content }]
@@ -366,30 +385,30 @@ index 000000000..b88977f7d
 +  return [...sections, ...back.map(entry => entry.content)].filter(Boolean).join('\n\n')
 +}
 +
-+export function pureWritingContext(system, messages) {
-+  const conversation = writingConversation(messages)
-+  const inputAt = conversation.findLastIndex(message => message.role === 'user')
++export function pureWritingContext(system, messages, frameId) {
++  const conversation = writingConversation(writingRequestMessages(messages || []))
++  const inputAt = conversation.findLastIndex(message => message.role === 'user' && inputKind(message))
 +  if (inputAt < 0) throw new Error('纯净写作找不到本轮玩家输入')
-+  return { system, messages: structuredClone(conversation.slice(Math.max(0, inputAt - 12), inputAt + 1)) }
++  return { system: stripWritingSystemReminders(system), messages: [...structuredClone(conversation.slice(0, inputAt + 1)), {
++    id: frameId + ':write',
++    role: 'user',
++    content: [{ type: 'text', text: OUTPUT }],
++    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' }
++  }] }
 +}
 +
 +export function projectWritingPreparationRequest(request, context) {
 +  return { ...request, system: context.system,
-+    messages: [...structuredClone(context.messages), ...request.messages.filter(message => message.role !== 'system')] }
++    messages: [...structuredClone(context.messages), ...writingRequestMessages(request.messages.filter(message => message.role !== 'system'))] }
 +}
 +
 +export function projectPureWritingRequest(request, { context, material, frame }) {
 +  const messages = structuredClone(context.messages)
-+  messages.push({
-+    id: frame.frameId + ':write',
-+    role: 'user',
-+    content: [{ type: 'text', text: OUTPUT }],
-+    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'write' }
-+  })
-+  if (material) messages.push({
++  const text = stripWritingSystemReminders(material || '')
++  if (text.trim()) messages.push({
 +    id: frame.frameId + ':inject',
 +    role: 'user',
-+    content: [{ type: 'text', text: material }],
++    content: [{ type: 'text', text }],
 +    source: { kind: 'plugin:dsh-tavern-pure-writer', form: 'inject' }
 +  })
 +  // Existing host protocol choices refer to the tool list that was replaced.
@@ -411,11 +430,12 @@ index fe0ae19bc..10f4c6f58 100644
        const content = validContent(args?.content)
 diff --git a/tavern-plugin/lib/domain/writing-material-text.js b/tavern-plugin/lib/domain/writing-material-text.js
 new file mode 100644
-index 000000000..690f022cc
+index 000000000..19cdc7d9a
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-material-text.js
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
 +import { marked } from 'marked'
++import { stripWritingSystemReminders } from './writing-system-reminders.js'
 +
 +const FRONT_MATTER = /^(?:\uFEFF)?---[ \t]*\r?\n(?:[^\r\n]*\r?\n)*?---[ \t]*(?:\r?\n|$)/
 +const PROSE_FENCE = /^(?:text|txt|plain|plaintext|md|markdown)$/i
@@ -469,7 +489,7 @@ index 000000000..690f022cc
 +}
 +
 +export function writingMaterialText(value) {
-+  const text = String(value ?? '').trimStart()
++  const text = stripWritingSystemReminders(String(value ?? '')).trimStart()
 +  const source = text.replace(FRONT_MATTER, '')
 +    .replace(/<!--[^]*?-->|<(script|style)\b[^>]*>[^]*?<\/\1\s*>/gi, '')
 +  const prose = withoutJson(proseBlocks(marked.lexer(source)))
@@ -599,10 +619,10 @@ index 000000000..2a9decb03
 +}
 diff --git a/tavern-plugin/lib/domain/writing-preparation.js b/tavern-plugin/lib/domain/writing-preparation.js
 new file mode 100644
-index 000000000..fdfec5faf
+index 000000000..26c632e66
 --- /dev/null
 +++ b/tavern-plugin/lib/domain/writing-preparation.js
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,102 @@
 +import { untilAborted } from './plugin-callback.js'
 +import { writingMaterialText } from './writing-material-text.js'
 +
@@ -662,12 +682,16 @@ index 000000000..fdfec5faf
 +      return text || NO_MATERIAL
 +    }
 +
++    function collectToolText() {
++      return untilAborted(Promise.all(toolResults), requestSignal).then(results =>
++        results.filter(result => result.ok && result.text !== NO_MATERIAL).map(result => result.text).join('\n\n'))
++    }
++
 +    function inject(args = {}) {
 +      requestSignal.throwIfAborted()
 +      if (submitted) throw new Error('本轮已提交 inject')
 +      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('inject 不接收参数')
-+      submitted = untilAborted(Promise.all(toolResults), requestSignal).then(results =>
-+        results.filter(result => result.ok && result.text !== NO_MATERIAL).map(result => result.text).join('\n\n'))
++      submitted = collectToolText()
 +      return submitted.then(() => ({ accepted: true }))
 +    }
 +
@@ -693,14 +717,45 @@ index 000000000..fdfec5faf
 +        }
 +      })), requestSignal)
 +      requestSignal.throwIfAborted()
-+      if (!submitted) throw new Error('白手套 Agent 没有调用 inject 提交正文上下文')
-+      return await submitted
++      return await (submitted ?? collectToolText())
 +    } finally {
 +      done.abort()
 +    }
 +  }
 +
 +  return { register, forGame, prepare }
++}
+diff --git a/tavern-plugin/lib/domain/writing-system-reminders.js b/tavern-plugin/lib/domain/writing-system-reminders.js
+new file mode 100644
+index 000000000..ccd19a695
+--- /dev/null
++++ b/tavern-plugin/lib/domain/writing-system-reminders.js
+@@ -0,0 +1,26 @@
++const HOST_REMINDERS = new Set(['runtime-context', 'skill-catalog', 'skill-invocation'])
++const REMINDER = /<system-reminder(?:\s[^>]*)?>[\s\S]*?(?:<\/system-reminder\s*>|$)/gi
++
++export function isWritingHostReminder(message) {
++  return message?.role === 'user' && HOST_REMINDERS.has(message.source?.kind)
++}
++
++export function stripWritingSystemReminders(text) {
++  return text.replace(REMINDER, '')
++}
++
++export function writingRequestMessages(messages) {
++  return messages.filter(message => !isWritingHostReminder(message)).flatMap(message => {
++    if (!Array.isArray(message?.content)) return [message]
++    let changed = false
++    const content = message.content.flatMap(block => {
++      if (block?.type !== 'text' || typeof block.text !== 'string') return [block]
++      const text = stripWritingSystemReminders(block.text)
++      if (text === block.text) return [block]
++      changed = true
++      return text.trim() ? [{ ...block, text }] : []
++    })
++    if (!changed) return [message]
++    return content.length ? [{ ...message, content }] : []
++  })
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
 index 442447f8f..7a0c377e9 100644
@@ -757,14 +812,24 @@ index 442447f8f..7a0c377e9 100644
          yield * ctx.llm.stream(markRequestHandled({ ...options, ...projected }, 'full-template'))
          return
 diff --git a/tavern-plugin/lib/hooks/request.js b/tavern-plugin/lib/hooks/request.js
-index 2bb454a15..5e0d0dbd1 100644
+index 2bb454a15..f3f8d8f90 100644
 --- a/tavern-plugin/lib/hooks/request.js
 +++ b/tavern-plugin/lib/hooks/request.js
-@@ -89,6 +89,7 @@ export function registerRequestHooks({
+@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
+ import { promptSection } from '../domain/prompt-section.js'
+ import { lastRoundVariableChanges } from '../domain/foreground-variable-changes.js'
+ import { synchronizeTemplateHistory } from '../domain/template-history.js'
++import { isWritingHostReminder } from '../domain/writing-system-reminders.js'
+
+ // Appended once at the start of a reply, so it joins the history after the cached prefix.
+ export function appendVariableChanges({ chat, payload, decision }) {
+@@ -89,6 +90,9 @@ export function registerRequestHooks({
        chat,
        requestId: requestIdForMessages(payload.messages)
      })
-+    if (foregroundStrategies.pureWritingTurn?.(sessionId)) return prepared
++    if (foregroundStrategies.pureWritingTurn?.(sessionId)) {
++      return { ...prepared, messages: prepared.messages.filter(message => !isWritingHostReminder(message)) }
++    }
      // prepareStep may render and persist a newer worldbook state. Restoring the
      // pre-prepare header would append stale content after the fresh delta.
      const recoveryChat = projectWorldbookRecovery ? await chatForSession(sessionId) : chat
