@@ -45,7 +45,7 @@ index 8fb5366e3..e792c715b 100644
            ? await options.resolveRuntimePresetSnapshot({
              sessionId: input.sessionId,
 diff --git a/tavern-plugin/lib/client.js b/tavern-plugin/lib/client.js
-index 8dccea205..19c37e1f3 100644
+index 8dccea205..a73bc5e45 100644
 --- a/tavern-plugin/lib/client.js
 +++ b/tavern-plugin/lib/client.js
 @@ -44943,6 +44943,32 @@ function createTavernStoryTranscriptDataModule(deps) {
@@ -143,6 +143,15 @@ index 8dccea205..19c37e1f3 100644
  				isEnabled: function (sessionId) {
  					return mode.getSnapshot() && mountedStories.has(String(sessionId))
  				}
+@@ -67627,7 +67668,7 @@ function createPlayInteractionPanels({ interactions, useCandidatePanel, useCandi
+             if (!request) return [];
+             const sections = [];
+             // System and tool declarations are independent request fields, not trailing messages.
+-            const metadata = Object.fromEntries(Object.entries(request).filter(([key]) => !['system', 'tools', 'messages'].includes(key)));
++            const metadata = Object.fromEntries(Object.entries(request).filter(([key]) => !['system', 'tools', 'messages', 'toolHistory'].includes(key)));
+             if (Object.keys(metadata).length) sections.push({ title: "调用参数", value: metadata, cacheKey: "field:metadata", sources: [{ category: "system", label: "调用参数" }] });
+             function addField(key) {
+                 if (!Object.hasOwn(request, key)) return;
 diff --git a/tavern-plugin/lib/domain/background-descriptors.js b/tavern-plugin/lib/domain/background-descriptors.js
 index 5095d9330..5e0ddb7b6 100644
 --- a/tavern-plugin/lib/domain/background-descriptors.js
@@ -601,6 +610,32 @@ index 000000000..4c84e86af
 +  }
 +  return false
 +}
+diff --git a/tavern-plugin/lib/domain/tool-history-presentation.js b/tavern-plugin/lib/domain/tool-history-presentation.js
+new file mode 100644
+index 000000000..47698a92b
+--- /dev/null
++++ b/tavern-plugin/lib/domain/tool-history-presentation.js
+@@ -0,0 +1,20 @@
++import { isDeepStrictEqual } from 'node:util'
++
++export function omitUnusedToolHistory(request) {
++  const history = request?.toolHistory
++  if (request?.purpose !== undefined || !history || !Array.isArray(request.tools)) return request
++
++  // The adapter can reconstruct old declarations from toolHistory. Replay it only
++  // when its updates survived projection and its schemas match the admitted tools.
++  if (Array.isArray(history.tools) && Array.isArray(history.updates) && history.updates.length) {
++    const developerIds = new Set(request.messages.filter(message => message.role === 'developer').map(message => message.id))
++    if (history.updates.every(update => developerIds.has(update.messageId) && Array.isArray(update.additions))) {
++      const declared = [...history.tools, ...history.updates.flatMap(update => update.additions)]
++      const allowed = new Map(request.tools.map(tool => [tool.name, tool]))
++      if (new Set(declared.map(tool => tool.name)).size === allowed.size &&
++        declared.every(tool => isDeepStrictEqual(tool, allowed.get(tool.name)))) return request
++    }
++  }
++  const { toolHistory, ...current } = request
++  return current
++}
 diff --git a/tavern-plugin/lib/domain/workspace-instruction-presentation.js b/tavern-plugin/lib/domain/workspace-instruction-presentation.js
 index 74ba910ac..56585c63f 100644
 --- a/tavern-plugin/lib/domain/workspace-instruction-presentation.js
@@ -998,18 +1033,20 @@ index 000000000..28e8c506c
 +  })
 +}
 diff --git a/tavern-plugin/lib/hooks/model-stream.js b/tavern-plugin/lib/hooks/model-stream.js
-index 442447f8f..ac607948c 100644
+index 442447f8f..5fb9d49d9 100644
 --- a/tavern-plugin/lib/hooks/model-stream.js
 +++ b/tavern-plugin/lib/hooks/model-stream.js
-@@ -7,6 +7,7 @@ import { installCompactionRequestProjection } from '../domain/compaction-request
+@@ -6,7 +6,9 @@ import { createStoryCompactionRequest, nativelyRetainedRounds, retainRecentStory
+ import { installCompactionRequestProjection } from '../domain/compaction-request.js'
  import { installPrefixBoundReasoningProjection } from '../domain/prefix-bound-reasoning.js'
  import { omitEmptyProviderContent } from '../domain/provider-message-content.js'
++import { omitUnusedToolHistory } from '../domain/tool-history-presentation.js'
  import { installWorkspaceInstructionPresentation } from '../domain/workspace-instruction-presentation.js'
 +import { isTavernAgentSession } from '../domain/tavern-agent-scope.js'
  import { presentModelError } from '../domain/model-error-presentation.js'
  import { markRequestHandled, requestHandledBy } from '../domain/request-lineage.js'
  import { bodyGenerationFailure } from '../domain/body-generation-failure.js'
-@@ -14,6 +15,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
+@@ -14,6 +16,7 @@ import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-stra
  import { STORY_CONTEXT_TOOL_NAME, STORY_SUBMIT_TOOL_NAME } from '../domain/story-tool-submission.js'
  import { isAutoToolOnlyModel, runWithToolProtocolDirective } from '../domain/tool-protocol-enforcement.js'
  import { createToolReplyStreamTracker } from '../domain/tool-reply-stream-parser.js'
@@ -1017,7 +1054,7 @@ index 442447f8f..ac607948c 100644
  
  // Prompt prose source. Keys are stable; interpolation arguments are data.
  export const PROMPT_PROSE = Object.freeze({
-@@ -29,6 +31,23 @@ export function applyCompactionModel(request, selection) {
+@@ -29,6 +32,23 @@ export function applyCompactionModel(request, selection) {
    return next
  }
 
@@ -1041,7 +1078,7 @@ index 442447f8f..ac607948c 100644
  export function registerModelStreamHooks({
    agentRegistry,
    pluginBodyGeneration,
-@@ -77,10 +96,10 @@ export function registerModelStreamHooks({
+@@ -77,10 +97,10 @@ export function registerModelStreamHooks({
    const ownsSession = async sessionId => backgroundAgentRunner.owns(sessionId) || await isGame(sessionId)
    // Compaction keeps its newest replies after the summary, behind a prefix they were not signed against.
    installPrefixBoundReasoningProjection(ctx, { ownsSession, session: id => sessionStore.get(id) || agentRegistry.get(id)?.session || backgroundAgentRunner.requestSession(id) })
@@ -1056,7 +1093,7 @@ index 442447f8f..ac607948c 100644
    installCompactionRequestProjection(ctx, ownsSession, async request => {
      // 前台对话压缩优先使用全局设置的专用压缩模型；后台 Agent 保持各自任务模型。
      const foreground = !backgroundAgentRunner.owns(request.sessionId)
-@@ -156,12 +175,24 @@ export function registerModelStreamHooks({
+@@ -156,12 +176,24 @@ export function registerModelStreamHooks({
          source: { kind: 'model', provider: str(options.provider), model: str(options.model) }
        }))
      }
@@ -1084,7 +1121,7 @@ index 442447f8f..ac607948c 100644
          const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
          const direct = await pluginBodyGeneration.direct(session, options.signal)
          if (direct) { yield * direct; return }
-@@ -169,12 +200,12 @@ export function registerModelStreamHooks({
+@@ -169,12 +201,12 @@ export function registerModelStreamHooks({
        // a director already owns frozen, projected sources.
        const director = backgroundContext?.task === 'stage-director'
        if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -1099,7 +1136,16 @@ index 442447f8f..ac607948c 100644
          const projected = await fullTemplateRuntime.forSession(ownerSessionId).projectRequestProjection({ messages: options.messages, system: options.system, model: options.model })
          yield * ctx.llm.stream(markRequestHandled({ ...options, ...projected }, 'full-template'))
          return
-@@ -264,6 +295,7 @@ export function registerModelStreamHooks({
+@@ -185,7 +217,7 @@ export function registerModelStreamHooks({
+       // Templates can erase text after the history projection. Check the final
+       // Tavern request before recording it or starting the downstream stream.
+       if (chat || backgroundContext || child || requestHandledBy(options, 'compaction-projection')) {
+-        const cleaned = omitEmptyProviderContent(options)
++        const cleaned = omitUnusedToolHistory(omitEmptyProviderContent(options))
+         if (cleaned !== options) { yield * ctx.llm.stream(cleaned); return }
+       }
+       const baseDirective = options.purpose === undefined ? toolProtocolDirectiveOf(options) : null
+@@ -264,6 +296,7 @@ export function registerModelStreamHooks({
            })
          : null
        let finish = null, usage = null
@@ -1107,7 +1153,7 @@ index 442447f8f..ac607948c 100644
        // 改写补出来的 text-delta 要沿用同一段正文的 index，assembler 靠它把 token 并进同一个正文块。
        let rewriteIndex = null
        let failure = null, interrupted = false
-@@ -277,6 +309,10 @@ export function registerModelStreamHooks({
+@@ -277,6 +310,10 @@ export function registerModelStreamHooks({
            if (item.done) {exhausted = true; break}
            let chunk = item.value
            liveness.chunk(chunk)
@@ -1363,6 +1409,19 @@ index 10566a77f..8786472a5 100644
      async getLatestRequestContext(args) {
        const sessionId = str(args?.sessionId)
        const background = backgroundAgentRunner.requestContext(sessionId)
+diff --git a/tavern-plugin/src/client/features/request-context.js b/tavern-plugin/src/client/features/request-context.js
+index 9edda3409..b8c8518a3 100644
+--- a/tavern-plugin/src/client/features/request-context.js
++++ b/tavern-plugin/src/client/features/request-context.js
+@@ -122,7 +122,7 @@
+             if (!request) return [];
+             const sections = [];
+             // System and tool declarations are independent request fields, not trailing messages.
+-            const metadata = Object.fromEntries(Object.entries(request).filter(([key]) => !['system', 'tools', 'messages'].includes(key)));
++            const metadata = Object.fromEntries(Object.entries(request).filter(([key]) => !['system', 'tools', 'messages', 'toolHistory'].includes(key)));
+             if (Object.keys(metadata).length) sections.push({ title: "调用参数", value: metadata, cacheKey: "field:metadata", sources: [{ category: "system", label: "调用参数" }] });
+             function addField(key) {
+                 if (!Object.hasOwn(request, key)) return;
 diff --git a/tavern-plugin/src/client/features/story-transcript-list.js b/tavern-plugin/src/client/features/story-transcript-list.js
 index 4555f27f0..44af243c2 100644
 --- a/tavern-plugin/src/client/features/story-transcript-list.js
@@ -1442,6 +1501,88 @@ index c25ed55ed..ca941e098 100644
  				try { record.binding.rebuild() }
  				catch (_) {}
  			}
+diff --git a/tests/plugin-agent-request-log.test.mjs b/tests/plugin-agent-request-log.test.mjs
+index d1440acbc..e9de604cf 100644
+--- a/tests/plugin-agent-request-log.test.mjs
++++ b/tests/plugin-agent-request-log.test.mjs
+@@ -28,7 +28,7 @@ test('Tavern sends and logs the same request after a template renders blank prom
+       if (input.messages.some(message => message.content.every(block => block.type === 'text' && !block.text.trim()))) {
+         throw Error('400: message content cannot be empty')
+       }
+-      received.push(input.messages)
++      received.push(input)
+       yield { type: 'finish', reason: { kind: 'stop' } }
+     }
+   })
+@@ -50,17 +50,24 @@ test('Tavern sends and logs the same request after a template renders blank prom
+   })
+   const hidden = { role: 'user', content: [{ type: 'text', text: '<% if (false) { %>旧提示<% } %>' }] }
+   const visible = { role: 'user', content: [{ type: 'text', text: '继续故事' }] }
+-  const original = Object.freeze({ sessionId, provider: 'initialization-fixture', model: 'text', system: '模板规则', messages: Object.freeze([hidden, visible]) })
++  const tools = [{ name: 'submit_story', description: 'Save story', parameters: { type: 'object' } }]
++  const toolHistory = { tools: [{ name: 'bash', description: 'Old tool', parameters: { type: 'object' } }], updates: [] }
++  const original = Object.freeze({ sessionId, provider: 'initialization-fixture', model: 'text', system: '模板规则', messages: Object.freeze([hidden, visible]),
++    tools, toolHistory })
+   const before = structuredClone(original)
+   const events = await Array.fromAsync(h.ctx.llm.stream(original))
+
+   assert.equal(events.at(-1)?.reason.kind, 'stop', JSON.stringify(events.at(-1)))
+   assert.equal(renders, 1)
+-  assert.deepEqual(received.map(messages => messages.flatMap(message => message.content.map(block => block.text))), [['继续故事']])
++  assert.deepEqual(received.map(input => input.messages.flatMap(message => message.content.map(block => block.text))), [['继续故事']])
++  assert.equal(received[0].toolHistory, undefined)
++  assert.deepEqual(received[0].tools, tools)
+   const { requests } = await log.evidence(chat.id)
+   assert.equal(requests.length, 1)
+   assert.deepEqual(requests[0].request.messages, [visible])
+   assert.equal(requests[0].request.system, undefined)
++  assert.equal(requests[0].request.toolHistory, undefined)
++  assert.deepEqual(requests[0].request.tools, tools)
+   assert.deepEqual(original, before)
+ })
+
+diff --git a/tests/request-context.test.mjs b/tests/request-context.test.mjs
+index 4c3c0ba60..ae391f4a2 100644
+--- a/tests/request-context.test.mjs
++++ b/tests/request-context.test.mjs
+@@ -5,6 +5,7 @@ import vm from 'node:vm'
+ import { createElement } from 'react'
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { computeRequestCacheDiff, extractPrefixSlots } from '../tavern-plugin/lib/domain/request-cache-diff.js'
++import { omitUnusedToolHistory } from '../tavern-plugin/lib/domain/tool-history-presentation.js'
+
+
+ // The panel is a client fragment concatenated into the built bundle, so exercise
+@@ -31,6 +32,29 @@ test('工具定义夹在前置系统消息与普通消息之间，消息下标
+   assert.deepEqual(titles(request), ['messages[0] · system · 预设前段', 'messages[1] · system', 'tools · 工具定义', 'messages[2] · user', 'messages[3] · assistant'])
+ })
+
++test('旧请求的调用参数不展开工具历史，实际工具定义照常显示', () => {
++  const tools = [{ name: 'submit_story' }]
++  const request = { model: 'deepseek-flash', toolHistory: { tools: [{ name: 'bash' }], updates: [] }, tools, messages: [] }
++  const rows = sections(request)
++  assert.deepEqual(rows.find(row => row.cacheKey === 'field:metadata').value, { model: 'deepseek-flash' })
++  assert.deepEqual(rows.find(row => row.cacheKey === 'field:tools').value, tools)
++  assert.equal(request.toolHistory.tools[0].name, 'bash')
++})
++
++test('工具历史只在工具声明一致且回放更新仍在时保留', () => {
++  const tools = [{ name: 'skill' }, { name: 'submit_story' }]
++  const messages = [{ role: 'developer', id: 'change', content: [{ type: 'tool-addition', toolName: 'submit_story' }] }]
++  const toolHistory = { tools: [tools[0]], updates: [{ messageId: 'change', additions: [tools[1]] }] }
++  const valid = { tools, messages, toolHistory }
++  assert.equal(omitUnusedToolHistory(valid), valid)
++  const stale = { ...valid, toolHistory: { ...toolHistory, tools: [{ name: 'bash' }, tools[0]] } }
++  assert.deepEqual(omitUnusedToolHistory(stale), { tools, messages })
++  assert.deepEqual(omitUnusedToolHistory({ ...valid, messages: [] }), { tools, messages: [] })
++  assert.deepEqual(omitUnusedToolHistory({ ...valid, toolHistory: { tools, updates: [] } }), { tools, messages })
++  const compaction = { ...stale, purpose: 'compaction' }
++  assert.equal(omitUnusedToolHistory(compaction), compaction)
++})
++
+ test('预设前段、后段会从消息正文里切出来，仍归属同一条消息', () => {
+   const body = '我推开门，风灌进来。'
+   const back = '【写作规则】保持克制。'
 diff --git a/tests/story-external-history.test.mjs b/tests/story-external-history.test.mjs
 index d98408ffb..b5b745b5f 100644
 --- a/tests/story-external-history.test.mjs
