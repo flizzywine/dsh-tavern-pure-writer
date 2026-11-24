@@ -1,16 +1,30 @@
 diff --git a/tavern-plugin/lib/background-agent-sessions.js b/tavern-plugin/lib/background-agent-sessions.js
-index 2b9456082..af69032c4 100644
+index 2b9456082..bc70f1178 100644
 --- a/tavern-plugin/lib/background-agent-sessions.js
 +++ b/tavern-plugin/lib/background-agent-sessions.js
-@@ -194,6 +194,7 @@ export function createBackgroundAgentSessions(options, task) {
+@@ -1,12 +1,11 @@
+ import { appendSessionEvent, matchesEventType, sessionEvents } from './domain/session-events.js'
+-import { STAGE_DIRECTOR_DESCRIPTOR, subagentDescriptor } from './domain/background-descriptors.js'
++import { LEGACY_BACKGROUND_PROVIDER, STAGE_DIRECTOR_DESCRIPTOR, WRITING_PREPARATION_DESCRIPTOR, subagentDescriptor } from './domain/background-descriptors.js'
+ import { randomUUID } from 'node:crypto'
+ import { maximumBackgroundTokens, traceError } from './background-agent-task.js'
+ import { createBackgroundRunLedger } from './background-run-ledger.js'
+ import { memberOf, pluginMember } from './domain/background-members.js'
+ import { applyAgentModelSelection } from './domain/session-model-selection.js'
+
+-const LEGACY_BACKGROUND_PROVIDER = 'dsh-tavern-background'
+ const BACKGROUND_PROVIDER = 'dsh-tavern-background-tools-v4'
+ const STALE_BACKGROUND_PROVIDERS = new Set([
+   LEGACY_BACKGROUND_PROVIDER,
+@@ -194,6 +193,7 @@ export function createBackgroundAgentSessions(options, task) {
      if (member) return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-plugin-member-v1', label: '插件成员：' + member.name })
      if (input.task === 'polish') return subagentDescriptor({ mode: 'continuable', provider: 'dsh-tavern-polish', label: '正文精修', agentProvider: input.selection.provider, agentModel: input.selection.model, persona: '只审读正文，通过精修工具逐处提交修改。' })
      if (input.task === 'stage-director') return STAGE_DIRECTOR_DESCRIPTOR
-+    if (input.task === 'plugin' && input.writingPreparation) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '白手套 Agent' })
++    if (input.task === 'plugin' && input.writingPreparation) return WRITING_PREPARATION_DESCRIPTOR
      if (input.task === 'plugin') return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '插件任务' + (input.pluginName ? '：' + String(input.pluginName).slice(0, 60) : '') })
      if (!persistent) return subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '候选研究' })
      return subagentDescriptor({
-@@ -368,6 +369,7 @@ export function createBackgroundAgentSessions(options, task) {
+@@ -368,6 +368,7 @@ export function createBackgroundAgentSessions(options, task) {
        maxTokens,
        operationId: str(input.operationId),
        ...(input.contextPolicy ? { contextPolicy: input.contextPolicy } : {}),
@@ -108,6 +122,19 @@ index 8dccea205..d411229dd 100644
  				isEnabled: function (sessionId) {
  					return mode.getSnapshot() && mountedStories.has(String(sessionId))
  				}
+diff --git a/tavern-plugin/lib/domain/background-descriptors.js b/tavern-plugin/lib/domain/background-descriptors.js
+index 5095d9330..5e0ddb7b6 100644
+--- a/tavern-plugin/lib/domain/background-descriptors.js
++++ b/tavern-plugin/lib/domain/background-descriptors.js
+@@ -17,6 +17,8 @@ export function subagentDescriptor(input) {
+ }
+
+ export const STAGE_DIRECTOR_PROVIDER = 'dsh-tavern-stage-director'
++export const LEGACY_BACKGROUND_PROVIDER = 'dsh-tavern-background'
+
+ // One-shot children carry only version, mode, provider and label.
+ export const STAGE_DIRECTOR_DESCRIPTOR = subagentDescriptor({ mode: 'one-shot', provider: STAGE_DIRECTOR_PROVIDER, label: '舞台导演' })
++export const WRITING_PREPARATION_DESCRIPTOR = subagentDescriptor({ mode: 'one-shot', provider: LEGACY_BACKGROUND_PROVIDER, label: '白手套 Agent' })
 diff --git a/tavern-plugin/lib/domain/compaction-checkpoint.js b/tavern-plugin/lib/domain/compaction-checkpoint.js
 index 13631f301..ac8a6c954 100644
 --- a/tavern-plugin/lib/domain/compaction-checkpoint.js
@@ -1135,24 +1162,42 @@ index 14bdb2987..fd907f9b2 100644
      // The asset library's access to the 配图 人物库 records (registerImageLibrary schema 4); outside any card.
      imageCharacters: (op, input) => imageCatalog.record(op, {}, input),
 diff --git a/tavern-plugin/lib/rpc/maintenance.js b/tavern-plugin/lib/rpc/maintenance.js
-index 10566a77f..69a221aa3 100644
+index 10566a77f..423a8a773 100644
 --- a/tavern-plugin/lib/rpc/maintenance.js
 +++ b/tavern-plugin/lib/rpc/maintenance.js
-@@ -9,7 +9,7 @@ import path from 'node:path'
+@@ -2,14 +2,16 @@ import { redactMvuLoadError, sanitizeModuleFailure, sanitizeMvuLoadDiagnostic }
+ import { saveSessionIds } from '../domain/save-upgrade.js'
+ import { exportSessionDiagnostics } from '../domain/session-diagnostics.js'
+ import { resolveTavernDataRoot } from '../domain/tavern-data.js'
++import { WRITING_PREPARATION_DESCRIPTOR } from '../domain/background-descriptors.js'
++import { matchesEventType } from '../domain/session-events.js'
+ import path from 'node:path'
+
+ // Save upgrade, host patch, app update and diagnostics requests.
+ // `deps` carries the services ../index.js builds; dispatchMethod routes by method name.
  export function createMaintenanceHandlers(deps) {
    const { TAVERN_PACKAGE_VERSION, agentRegistry, applicationUpdater, attachPlayChatDebug,
-     backgroundAgentRunner, chatForSession, chatHeaderForSession, compatibilityDiagnostics,
+-    backgroundAgentRunner, chatForSession, chatHeaderForSession, compatibilityDiagnostics,
 -    displayRuntimeCaptures, exportTavernLogs, hostCompatibility, modelRequestLog, mvuDiagnostics,
++    backgroundAgentRunner, chatForSession, chatHeaderForSession, compatibilityDiagnostics, ctx,
 +    displayRuntimeCaptures, exportTavernLogs, hostCompatibility, modelRequestLog, mvuDiagnostics, pluginApi,
      preparedSaveSessions, readChat, readChatCard, readSessionMap, saveUpgrade, sessionPatch,
      sessionStateForSession, sessionStore, str, worldbookRecallLog } = deps
    const handlers = {
-@@ -58,6 +58,13 @@ export function createMaintenanceHandlers(deps) {
+@@ -58,6 +60,21 @@ export function createMaintenanceHandlers(deps) {
      async cancelUpdate(args) {
        return { status: await applicationUpdater.cancel() }
      },
 +    async getWritingTrajectoryPolicy(args) {
 +      const sessionId = str(args?.sessionId)
++      if (backgroundAgentRunner.requestContext(sessionId)?.writingPreparation) return { hideSystemReminders: true }
++      if (sessionId.startsWith('background-')) {
++        const snapshot = await ctx.get('sessionQuery')?.readSession(sessionId).catch(() => null)
++        const descriptor = snapshot?.events?.find(event => matchesEventType(event, 'subagent/descriptor'))?.data
++        const { mode, provider, label } = WRITING_PREPARATION_DESCRIPTOR
++        return { hideSystemReminders: snapshot?.session?.origin === 'subagent'
++          && descriptor?.mode === mode && descriptor.provider === provider && descriptor.label === label }
++      }
 +      const chat = sessionId && await chatHeaderForSession(sessionId, ['mode', 'requestMode'])
 +      const writing = chat && chat.requestMode !== 'sillytavern' && ['story', 'script'].includes(chat.mode)
 +        && await pluginApi.writingPreparation.forGame(sessionId)
@@ -1278,3 +1323,39 @@ index d98408ffb..c82e09c06 100644
  test('故事模式下未物化的旧回合不构建 chat 节点，返回 null 且不调用原生 buildNode', () => {
  	const h = harness()
  	assert.equal(h.instance.binding('s1'), h.binding)
+diff --git a/tests/writing-trajectory-policy.test.mjs b/tests/writing-trajectory-policy.test.mjs
+new file mode 100644
+index 000000000..74f084040
+--- /dev/null
++++ b/tests/writing-trajectory-policy.test.mjs
+@@ -0,0 +1,30 @@
++import assert from 'node:assert/strict'
++import test from 'node:test'
++import { WRITING_PREPARATION_DESCRIPTOR } from '../tavern-plugin/lib/domain/background-descriptors.js'
++import { createMaintenanceHandlers } from '../tavern-plugin/lib/rpc/maintenance.js'
++
++test('writing trajectory policy also covers finished White Gloves after restart', async () => {
++  const reads = []
++  const query = {
++    async readSession(id) {
++      reads.push(id)
++      if (id === 'background-missing') throw new Error('not found')
++      const data = id === 'background-cold' ? WRITING_PREPARATION_DESCRIPTOR : { ...WRITING_PREPARATION_DESCRIPTOR, label: '普通插件任务' }
++      return { session: { origin: 'subagent' }, events: [{ type: 'subagent/descriptor', data }] }
++    }
++  }
++  const { getWritingTrajectoryPolicy: policy } = createMaintenanceHandlers({
++    str: value => String(value ?? ''),
++    ctx: { get: () => query },
++    backgroundAgentRunner: { requestContext: id => id === 'background-active' ? { writingPreparation: {} } : null },
++    chatHeaderForSession: id => id === 'card' ? { mode: 'card' } : { mode: 'story' },
++    pluginApi: { writingPreparation: { forGame: async id => id === 'game-enabled' ? {} : null } }
++  })
++  for (const sessionId of ['background-active', 'background-cold', 'game-enabled']) {
++    assert.deepEqual(await policy({ sessionId }), { hideSystemReminders: true })
++  }
++  for (const sessionId of ['background-unrelated', 'background-missing', 'game-disabled', 'card']) {
++    assert.deepEqual(await policy({ sessionId }), { hideSystemReminders: false })
++  }
++  assert.deepEqual(reads, ['background-cold', 'background-unrelated', 'background-missing'])
++})
