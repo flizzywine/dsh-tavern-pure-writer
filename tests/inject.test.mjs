@@ -178,6 +178,7 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
     assert.deepEqual(task.writingPreparation, context)
     const tools = Object.fromEntries(task.tools.map(tool => [tool.name, args => task.call(tool.name, args)]))
     assert.deepEqual(Object.keys(tools), ['load_writing_skill', 'find_worldbook', 'recall_memory', 'read_variable_summary'])
+    assert.deepEqual(task.tools.find(tool => tool.name === 'read_variable_summary').parameters.required, ['query'])
     const base = tools.load_writing_skill({ name: 'short' })
     const reference = await tools.load_writing_skill({ name: 'short', reference: 'references/tower.md' })
     const book = await tools.find_worldbook({ query: '钟楼' })
@@ -407,7 +408,7 @@ test('白手套写出的回复不进入自动交接', async () => {
   assert.equal(await prepare(), receipt)
 })
 
-test('查询将嵌套的变量状态和最近变化表达成自然句子', async () => {
+test('定向查询将命中的变量和最近变化表达成自然句子', async () => {
   const previous = { 金币: 2, 钟楼: { 状态: '关闭' } }
   const current = { 金币: 3, 钟楼: { 状态: '开放', 道具: ['钥匙', '地图'], '__internal': '/tmp/internal' } }
   const chat = {
@@ -418,11 +419,9 @@ test('查询将嵌套的变量状态和最近变化表达成自然句子', async
     gameId: 'game', signal: new AbortController().signal,
     frame: { source: { regenerationMaterials: { generationState: { variables: { stat_data: current } } } } }
   })
-  const rows = await sources.variables({})
-  const text = rows.map(row => row.text).join('\n')
-  assert.match(text, /金币为 3。/)
-  assert.match(text, /钟楼的状态为 开放。/)
-  assert.match(text, /钟楼的道具的第 1 项为 钥匙。/)
-  assert.match(rows.find(row => row.title === '上轮变量变化').text, /金币为 3。/)
-  assert.doesNotMatch(text, /[{}\[\]]|__internal|\/tmp| = |<variable_changes>/)
+  assert.deepEqual(await sources.variables({}), [])
+  assert.deepEqual(await sources.variables({ query: '金币' }), [{ title: '上轮变量变化', text: '金币为 3。' }])
+  assert.deepEqual(await sources.variables({ query: '钟楼 状态' }), [{ title: '上轮变量变化', text: '钟楼的状态为 开放。' }])
+  const items = await sources.variables({ query: '钟楼 道具' })
+  assert.deepEqual(items.map(row => row.text), ['钟楼的道具的第 1 项为 钥匙。\n钟楼的道具的第 2 项为 地图。'])
 })
