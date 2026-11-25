@@ -32,7 +32,7 @@ function createFixture(readers, runTask, requestContext = context, requestFrame 
     runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
   apply({ tavern: {
-    capabilities: { writingPreparation: 6 }, handle() {}, readGameData: async () => null,
+    capabilities: { writingPreparation: 7 }, handle() {}, readGameData: async () => null,
     writingPreparation: value => preparation.register('pure-writer', value)
   } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext, frame: requestFrame })
@@ -158,7 +158,7 @@ test('同一白手套的前轮工具轨迹不重复进入本轮查询', () => {
   assert.deepEqual(projected.messages, [...context.messages, currentTask, currentReceipt])
 })
 
-test('Skill 和参考原文只返回给白手套，其他回执按调用顺序自动交接', async () => {
+test('世界书和记忆原样交接，变量仅交接白手套提交的剧情事实', async () => {
   const skill = Promise.withResolvers()
   const fragment = '第二段也会交给前台。'.repeat(120)
   const readers = {
@@ -168,7 +168,9 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
       if (turn) throw new Error('读取失败')
       return [{ title: '第 1 轮', text: '钥匙藏在墙缝。' }]
     },
-    variables: () => Array.from({ length: 6 }, (_, i) => ({ title: `变量 ${i}`, text: i + '甲'.repeat(4999) }))
+    variables: () => Array.from({ length: 6 }, (_, i) => ({
+      title: `变量 ${i}`, text: i === 0 ? '林婉的车票还有 3 张。\n' + '甲'.repeat(4980) : i + '甲'.repeat(4999)
+    }))
   }
   let outputs
   const prepare = createFixture(readers, async task => {
@@ -177,8 +179,11 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
     assert.doesNotMatch(task.prompt, /inject/)
     assert.deepEqual(task.writingPreparation, context)
     const tools = Object.fromEntries(task.tools.map(tool => [tool.name, args => task.call(tool.name, args)]))
-    assert.deepEqual(Object.keys(tools), ['load_writing_skill', 'find_worldbook', 'recall_memory', 'read_variable_summary'])
+    assert.deepEqual(Object.keys(tools), ['load_writing_skill', 'find_worldbook', 'recall_memory', 'read_variable_summary', 'submit_variable_facts'])
     assert.deepEqual(task.tools.find(tool => tool.name === 'read_variable_summary').parameters.required, ['query'])
+    assert.equal(task.stopToolsWhen(), false)
+    const premature = await tools.submit_variable_facts({ facts: ['林婉手里还有三张车票。'] })
+    assert.equal(JSON.parse(premature).ok, false)
     const base = tools.load_writing_skill({ name: 'short' })
     const reference = await tools.load_writing_skill({ name: 'short', reference: 'references/tower.md' })
     const book = await tools.find_worldbook({ query: '钟楼' })
@@ -188,6 +193,11 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
     assert.equal(variables.length, 20000)
     const error = await tools.recall_memory({ turn: 999 })
     assert.deepEqual(JSON.parse(error), { ok: false, error: '读取失败' })
+    const technical = await tools.submit_variable_facts({ facts: ['林婉的 profileLocked 为真。'] })
+    assert.equal(JSON.parse(technical).ok, false)
+    const delivered = await tools.submit_variable_facts({ facts: ['林婉手里还有三张车票。'] })
+    assert.deepEqual(JSON.parse(delivered), { accepted: true })
+    assert.equal(task.stopToolsWhen(), true)
     assert.equal(task.acceptWithoutText(), true)
     skill.resolve([{ title: 'short', text: [
       '---', 'entry: scripts/launch.sh', '---', '正文第一段。', '路径：/tmp/book.json',
@@ -200,12 +210,12 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
   })
   const material = await prepare()
   assert.ok(outputs[0].endsWith(fragment))
-  assert.equal(material, outputs.slice(2).join('\n\n'))
+  assert.equal(material, [...outputs.slice(2, 5), '【当前状态】\n林婉手里还有三张车票。'].join('\n\n'))
   assert.match(outputs[0], /从林婉的视角描写。/)
   assert.match(outputs[0], /钟楼藏在北岸。钥匙留在桌上。/)
   assert.match(outputs[1], /参考文件全文。/)
   assert.doesNotMatch(outputs.join('\n'), /launch\.sh|npm install|\/tmp\/|references\/|[{}]|story\.py|读取失败|config\/|My Documents|宿主提醒|" "/)
-  assert.doesNotMatch(material, /写作指引|参考文件全文|钟楼藏在北岸/)
+  assert.doesNotMatch(material, /写作指引|参考文件全文|钟楼藏在北岸|当前变量|变量查询结果|profileLocked/)
 
   const request = projectPureWritingRequest({
     system: '旧 Skill 目录', messages: [], toolChoice: 'any',
@@ -217,15 +227,17 @@ test('Skill 和参考原文只返回给白手套，其他回执按调用顺序�
   assert.deepEqual(request.messages, [player, pureWritingInjection(frame, material)])
 })
 
-test('旧的混合注入按原位置保留非 Skill 回执，纯 Skill 注入退出上下文', () => {
+test('历史注入保留世界书和剧情事实，去掉 Skill 和旧变量原文', () => {
   const skill = '【写作指引】\n只用于查询的规则。'
   const reference = '【写作 Skill · 参考】\n旧版参考内容。'
   const book = '【世界书 · 钟楼】\n第一段。\n\n第二段。'
   const memory = '【剧情记忆 · 第 1 轮】\n她曾敲钟。'
-  const previous = pureWritingInjection(frame, [skill, book, reference, memory].join('\n\n'))
-  const skillOnly = pureWritingInjection({ ...frame, frameId: 'only-skill' }, skill)
-  const shared = pureWritingContext(context.system, [previous, skillOnly, player])
-  const expected = { ...previous, content: [{ type: 'text', text: book + '\n\n' + memory }] }
+  const raw = '【当前变量 · game】\ngame的player的balance为 42。'
+  const facts = '【当前状态】\n林婉手里还有三张车票。'
+  const previous = pureWritingInjection(frame, [skill, book, reference, memory, raw, facts].join('\n\n'))
+  const rawOnly = pureWritingInjection({ ...frame, frameId: 'only-raw' }, raw)
+  const shared = pureWritingContext(context.system, [previous, rawOnly, player])
+  const expected = { ...previous, content: [{ type: 'text', text: [book, memory, facts].join('\n\n') }] }
   assert.deepEqual(shared.messages, [expected, player])
   assert.deepEqual(projectPureWritingRequest({ tools: [] }, { context: shared }).messages, [expected, player])
   assert.ok(previous.content[0].text.startsWith(skill))
