@@ -18,7 +18,7 @@ const player = { id: 'player', role: 'user', source: { kind: 'user' }, content: 
 const context = pureWritingContext('钟楼夜景，采用第三人称。', [player])
 const input = { gameId: 'game', frame, context }
 
-function createFixture(readers, runTask, requestContext = context, requestFrame = frame) {
+function createFixture(readers, runTask, requestContext = context, requestFrame = frame, version = 7) {
   const execution = createPluginTaskExecution({
     runTask,
     requireGame: async sessionId => ({ sessionId }),
@@ -32,11 +32,28 @@ function createFixture(readers, runTask, requestContext = context, requestFrame 
     runAgent: (owner, task, writingPreparation, onToolResult) => execution.runAgent(owner, task, { writingPreparation, onToolResult })
   })
   apply({ tavern: {
-    capabilities: { writingPreparation: 7 }, handle() {}, readGameData: async () => null,
+    capabilities: { writingPreparation: version }, handle() {}, readGameData: async () => null,
     writingPreparation: value => preparation.register('pure-writer', value)
   } })
   return async () => preparation.prepare(await preparation.forGame(input.gameId), { ...input, context: requestContext, frame: requestFrame })
 }
+
+test('查询额度用完后自动交接最终回复，变量事实无需调用提交工具', async () => {
+  const prepare = createFixture({
+    variables: () => [{ title: '余额', text: 'playerBalance 为 42 元。' }],
+    worldbook: () => [{ title: '钟楼', text: '塔钟在整点响。' }]
+  }, async task => {
+    assert.deepEqual(task.tools.map(tool => tool.name), ['load_writing_skill', 'find_worldbook', 'recall_memory', 'read_variable_summary'])
+    assert.equal(task.stopToolsWhen, undefined)
+    assert.equal(task.maxToolCalls, 13)
+    assert.match(task.prompt, /最终回复里只输出 JSON/)
+    await task.call('read_variable_summary', { query: '余额' })
+    for (let i = 1; i < task.maxToolCalls; i++) await task.call('find_worldbook', { query: '钟楼' })
+    assert.match(await task.call('find_worldbook', { query: '钟楼' }), /次数已达上限/)
+    task.writingPreparation.receiveVariableReply('{"facts":["玩家账户里还剩 42 元。"]}')
+  }, context, frame, 8)
+  assert.equal(await prepare(), '【世界书 · 钟楼】\n塔钟在整点响。\n\n【当前状态】\n玩家账户里还剩 42 元。')
+})
 
 test('按对局保存接管开关，默认采用前台请求模型并允许单独指定', async () => {
   const handlers = new Map()
@@ -333,6 +350,9 @@ test('白手套沿用前台的设定与原文历史，前轮的注入随原位�
 
 test('白手套沿用前台历史，流式输出只留下思考、工具调用和完成信号', async () => {
   const hooks = []
+  const replies = []
+  let ending = false
+  const finalReply = '{"facts":["塔钟在整点响。"]}'
   const thinking = { type: 'reasoning-delta', index: 0, text: '查钟楼设定。' }
   const toolStart = { type: 'block-start', index: 5, blockType: 'tool-call' }
   const toolEnd = { type: 'block-end', index: 5, block: { type: 'tool-call', id: 'query', name: 'find_worldbook', arguments: '{"query":"钟楼"}' } }
@@ -343,6 +363,12 @@ test('白手套沿用前台历史，流式输出只留下思考、工具调用�
     llm: { stream(request) {
       const downstream = async function * () {
         yield request
+        if (ending) {
+          yield { type: 'text-delta', index: 0, text: finalReply.slice(0, 8) }
+          yield { type: 'text-delta', index: 0, text: finalReply.slice(8) }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
         yield thinking
         yield { type: 'block-start', index: 3, blockType: 'text' }
         yield toolStart
@@ -362,7 +388,9 @@ test('白手套沿用前台历史，流式输出只留下思考、工具调用�
   registerModelStreamHooks({
     ctx, requestCoordinates: new Map(), str: value => String(value ?? ''),
     chatHeaderForSession: async () => undefined, sessionStore: new Map(), agentRegistry: new Map(),
-    backgroundAgentRunner: { owns: () => true, requestContext: () => ({ parentSessionId: 'game', writingPreparation: context }) },
+    backgroundAgentRunner: { owns: () => true, requestContext: () => ({ parentSessionId: 'game', writingPreparation: {
+      ...context, receiveVariableReply: text => replies.push(text)
+    } }) },
     foregroundStrategies: { projectRequest: () => assert.fail('共享历史不进入通用请求改写'), completeRequest() {} }
   })
   const task = { id: 'task', role: 'user', content: [{ type: 'text', text: '查资料。' }] }
@@ -372,6 +400,11 @@ test('白手套沿用前台历史，流式输出只留下思考、工具调用�
   assert.deepEqual(chunks, [thinking, toolStart, toolEnd, {
     ...finish, replayState: { ...finish.replayState, blocks: [{ hint: 'reasoning' }, { hint: 'tool' }] }
   }])
+  assert.deepEqual(replies, [])
+  ending = true
+  const [, ...finalChunks] = await Array.fromAsync(ctx.llm.stream({ sessionId: 'white-glove', provider: 'deepseek-official', messages: [task] }))
+  assert.deepEqual(finalChunks, [{ type: 'finish', reason: { kind: 'stop' } }])
+  assert.deepEqual(replies, [finalReply])
 })
 
 test('两边的实际写作请求过滤宿主提醒及其内容，保留相邻正文和资料', () => {
